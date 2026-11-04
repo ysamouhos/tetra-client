@@ -79,7 +79,9 @@ class AudioIO {
       noiseSuppress: voiceProcessing,
       autoGain: voiceProcessing,
       androidConfig: const AndroidRecordConfig(
-        audioSource: AndroidAudioSource.voiceCommunication,
+        // Plain mic: on Samsung (and others) voiceCommunication yields near-silent input
+        // unless the whole system is in call mode.
+        audioSource: AndroidAudioSource.mic,
       ),
     ));
     _micSub = stream.listen((bytes) {
