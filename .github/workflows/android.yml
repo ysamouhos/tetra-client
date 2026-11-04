@@ -1,4 +1,4 @@
-# Builds the Android app on the self-hosted runner labelled "runner1".
+# Builds the Android app on the self-hosted runner labelled "self-hosted".
 # Outputs (Actions run page -> Artifacts): tetra-terminal-android (debug-signed APKs, for testing).
 # Signed release builds are produced by release.yml.
 name: Android
@@ -10,7 +10,7 @@ on:
 
 jobs:
   android:
-    runs-on: [self-hosted, runner1]
+    runs-on: self-hosted
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
