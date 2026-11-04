@@ -23,14 +23,31 @@ if [ ! -d rust_builder ]; then
   cp -r "$TMP/scratch/rust_builder" .
   rm -rf "$TMP"
   # Cargokit paths are relative to rust_builder/{android,ios}.
-  grep -rl "../../rust" rust_builder | xargs sed -i.bak \
-    -e "s#\.\./\.\./rust#../../../tetra_core#g" \
-    -e "s#rust_lib_tetra_terminal#tetra_core#g"
-  find rust_builder -name "*.bak" -delete
+  # Point cargokit at ../tetra_core and its library name (portable: GNU and BSD).
+  python3 - <<'PY'
+import os, sys
+changed = 0
+for root, _, files in os.walk("rust_builder"):
+    if "/build_tool/.dart_tool" in root:
+        continue
+    for name in files:
+        path = os.path.join(root, name)
+        try:
+            text = open(path, encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        new = text.replace("../../rust", "../../../tetra_core").replace("rust_lib_tetra_terminal", "tetra_core")
+        if new != text:
+            open(path, "w", encoding="utf-8").write(new)
+            changed += 1
+            print("patched", path)
+if changed == 0:
+    sys.exit("rust_builder: nothing to patch -- flutter_rust_bridge template changed?")
+PY
   # Newer Android Gradle Plugin: namespace must come from build.gradle, not the manifest.
-  sed -i 's/ package="[^"]*"//' rust_builder/android/src/main/AndroidManifest.xml
+  sed -i.bak 's/ package="[^"]*"//' rust_builder/android/src/main/AndroidManifest.xml && rm -f rust_builder/android/src/main/AndroidManifest.xml.bak
   grep -q namespace rust_builder/android/build.gradle || \
-    sed -i 's/^android {/android {\n    namespace "com.flutter_rust_bridge.rust_lib_tetra_terminal"/' rust_builder/android/build.gradle
+    python3 -c 'import sys;p=sys.argv[1];s=open(p).read();open(p,"w").write(s.replace("android {","android {\n    namespace \"com.flutter_rust_bridge.tetra_core\"",1))' rust_builder/android/build.gradle
 fi
 
 # 3. Rustup targets.
