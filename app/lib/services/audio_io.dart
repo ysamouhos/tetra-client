@@ -21,6 +21,9 @@ class AudioIO {
   static const _micRate = 16000;
   final _decim = _Decimator2();
 
+  /// Microphone trim in dB (applies immediately, also mid-transmission).
+  set micGainDb(double db) => _decim.setTrimDb(db);
+
   final _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _micSub;
   bool _playerReady = false;
@@ -145,7 +148,11 @@ class AudioIO {
 /// second sample. Streaming: carries filter history between chunks.
 class _Decimator2 {
   static const _taps = 47;
-  static const micGain = 0.6;
+  /// Built-in level (-4.4 dB); the user's trim is applied on top.
+  static const _baseGain = 0.6;
+  double gain = _baseGain;
+
+  void setTrimDb(double db) => gain = _baseGain * math.pow(10, db / 20).toDouble();
   /// Peak ceiling after the gain. Louder input is attenuated instead of being
   /// allowed to overdrive the ACELP encoder (harsh beeps on loud speech).
   static const _limit = 12000.0;
@@ -164,9 +171,9 @@ class _Decimator2 {
       return sinc * w;
     });
     final sum = h.fold<double>(0, (a, b) => a + b);
-    // Unity DC gain, then micGain (-4 dB): phone mics run hot (peaks of 20000+) and a
-    // near-clipping input makes the ACELP encoder produce harsh beeps.
-    return [for (final v in h) v / sum * micGain];
+    // Unity DC gain; level is applied in [process] (phone mics run hot, and a
+    // near-clipping input makes the ACELP encoder produce harsh beeps).
+    return [for (final v in h) v / sum];
   }
 
   List<double> _hist = List<double>.filled(_taps - 1, 0);
@@ -195,6 +202,7 @@ class _Decimator2 {
         for (var t = 0; t < _taps; t++) {
           y += _h[t] * c[base - t];
         }
+        y *= gain;
         // Instant-attack limiter: pull the gain down to fit the peak, ease back up.
         final a = y.abs();
         final want = a * _gain > _limit ? _limit / a : 1.0;

@@ -74,6 +74,7 @@ class TerminalModel extends ChangeNotifier {
 
   Future<void> start() async {
     await audio.init();
+    audio.micGainDb = settings.micGainDb;
     if (settings.isConfigured) await connect();
   }
 
@@ -259,6 +260,7 @@ class TerminalModel extends ChangeNotifier {
 
   Future<void> applySettings(Settings s) async {
     settings = s;
+    audio.micGainDb = s.micGainDb;
     await s.save();
     await connect();
   }

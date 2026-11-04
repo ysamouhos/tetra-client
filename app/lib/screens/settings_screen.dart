@@ -73,6 +73,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           value: s.allowPreemption,
           onChanged: (v) => setState(() => s.allowPreemption = v),
         ),
+        ListTile(
+          title: Text('Microphone gain: ${s.micGainDb >= 0 ? '+' : ''}${s.micGainDb.round()} dB'),
+          subtitle: Slider(
+            value: s.micGainDb,
+            min: -12,
+            max: 12,
+            divisions: 24,
+            onChanged: (v) {
+              setState(() => s.micGainDb = v);
+              m.audio.micGainDb = v; // live: takes effect on the next transmission
+            },
+          ),
+        ),
         const Divider(),
         Text('Location (LIP)', style: Theme.of(context).textTheme.titleMedium),
         SwitchListTile(title: const Text('Send location reports'), value: s.lipEnabled, onChanged: (v) => setState(() => s.lipEnabled = v)),

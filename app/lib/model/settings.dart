@@ -25,6 +25,9 @@ class Settings {
   bool allowPreemption = true;
   bool insecureTls = false;
 
+  /// Microphone trim in dB on top of the built-in level (-12..+12).
+  double micGainDb = 0;
+
   /// Digits the server's SIP route expects before an outside number (e.g. "9"). Empty = none.
   String externalPrefix = '';
   List<Talkgroup> talkgroups = [];
@@ -57,6 +60,7 @@ class Settings {
       ..defaultPriority = j['defaultPriority'] ?? 1
       ..allowPreemption = j['allowPreemption'] ?? true
       ..insecureTls = j['insecureTls'] ?? false
+      ..micGainDb = (j['micGainDb'] as num?)?.toDouble() ?? 0
       ..externalPrefix = j['externalPrefix'] ?? ''
       ..talkgroups = ((j['talkgroups'] as List?) ?? []).map((e) => Talkgroup.fromJson(e as Map<String, dynamic>)).toList()
       ..selectedGssi = j['selectedGssi']
@@ -81,6 +85,7 @@ class Settings {
         'defaultPriority': defaultPriority,
         'allowPreemption': allowPreemption,
         'insecureTls': insecureTls,
+        'micGainDb': micGainDb,
         'externalPrefix': externalPrefix,
         'talkgroups': talkgroups.map((t) => t.toJson()).toList(),
         'selectedGssi': selectedGssi,
