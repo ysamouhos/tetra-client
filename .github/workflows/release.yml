@@ -88,6 +88,27 @@ jobs:
       - name: Analyze + test
         working-directory: app
         run: flutter analyze --no-fatal-infos && flutter test
+      - name: Release signing key
+        working-directory: app/android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is missing; refusing to publish a release signed with a throwaway key."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > app/upload-keystore.jks
+          {
+            echo "storeFile=upload-keystore.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > key.properties
+          keytool -list -keystore app/upload-keystore.jks -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" | head -3
+
       - name: Build APKs
         working-directory: app
         run: |
@@ -100,6 +121,10 @@ jobs:
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk   ../dist/tetra-terminal-$V-android-arm64.apk
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk ../dist/tetra-terminal-$V-android-arm32.apk
           ls -la ../dist
+          # Fail if the APK is still signed with the Android debug key.
+          APKSIGNER=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs ../dist/*-android-universal.apk | tee /tmp/certs.txt
+          ! grep -q "CN=Android Debug" /tmp/certs.txt
       - uses: actions/upload-artifact@v4
         with:
           name: android

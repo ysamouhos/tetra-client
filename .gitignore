@@ -23,3 +23,8 @@ app/.idea/
 out/
 *.apk
 *.ipa
+
+# Signing secrets
+*.jks
+*.keystore
+key.properties

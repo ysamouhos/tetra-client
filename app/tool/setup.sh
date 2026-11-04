@@ -130,6 +130,50 @@ flutter pub get
 flutter_rust_bridge_codegen generate
 dart run build_runner build --delete-conflicting-outputs
 
+# 6b. Release signing: use android/key.properties (written by CI from secrets,
+#     or by you locally) when it exists; otherwise release builds use the debug key.
+python3 - <<'PY'
+import os, re, sys
+p = "android/app/build.gradle.kts"
+if not os.path.exists(p):
+    sys.exit("expected android/app/build.gradle.kts (Kotlin DSL) for release signing")
+s = open(p).read()
+if "keystoreProperties" not in s:
+    props = (
+        "\nval keystoreProperties = java.util.Properties().apply {\n"
+        "    val f = rootProject.file(\"key.properties\")\n"
+        "    if (f.exists()) f.inputStream().use { load(it) }\n"
+        "}\n"
+    )
+    m = re.search(r"^plugins \{.*?^\}\n", s, re.S | re.M)
+    if not m:
+        sys.exit("no plugins {} block in " + p)
+    s = s[:m.end()] + props + s[m.end():]
+    signing = (
+        "    signingConfigs {\n"
+        "        create(\"release\") {\n"
+        "            if (!keystoreProperties.isEmpty) {\n"
+        "                storeFile = file(keystoreProperties.getProperty(\"storeFile\"))\n"
+        "                storePassword = keystoreProperties.getProperty(\"storePassword\")\n"
+        "                keyAlias = keystoreProperties.getProperty(\"keyAlias\")\n"
+        "                keyPassword = keystoreProperties.getProperty(\"keyPassword\")\n"
+        "            }\n"
+        "        }\n"
+        "    }\n\n"
+        "    buildTypes {"
+    )
+    if "    buildTypes {" not in s:
+        sys.exit("no buildTypes block in " + p)
+    s = s.replace("    buildTypes {", signing, 1)
+    s, n = re.subn(r'signingConfig = signingConfigs\.getByName\("debug"\)',
+                   'signingConfig = if (keystoreProperties.isEmpty) signingConfigs.getByName("debug") else signingConfigs.getByName("release")',
+                   s, count=1)
+    if n != 1:
+        sys.exit("could not find the release signingConfig line in " + p)
+    open(p, "w").write(s)
+    print("release signing wired into", p)
+PY
+
 # 6. App icon and display name.
 dart run flutter_launcher_icons
 sed -i.bak -E 's/android:label="[^"]*"/android:label="TETRA Terminal"/' android/app/src/main/AndroidManifest.xml && rm -f android/app/src/main/AndroidManifest.xml.bak
