@@ -17,6 +17,7 @@ class AudioIO {
   final _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _micSub;
   bool _playerReady = false;
+  DateTime _lastPlay = DateTime.fromMillisecondsSinceEpoch(0);
   final _carry = BytesBuilder(copy: false);
 
   Future<void> init() async {
@@ -47,19 +48,24 @@ class AudioIO {
 
   /// Starts streaming microphone audio to [onPcm]. Echo cancellation is on
   /// so full-duplex calls do not feed the speaker back into the mic.
-  Future<void> startMic(void Function(Int16List pcm) onPcm) async {
+  ///
+  /// [voiceProcessing] enables platform echo cancellation / noise suppression /
+  /// AGC. Only full-duplex calls need it; in half-duplex PTT the speaker is
+  /// silent while the mic is live, and the processing only distorts the signal
+  /// the ACELP encoder sees (and on iOS contends with the playback engine).
+  Future<void> startMic(void Function(Int16List pcm) onPcm, {bool voiceProcessing = false}) async {
     if (_micSub != null) return;
     if (!await _recorder.hasPermission()) {
       throw StateError('Microphone permission denied');
     }
-    final stream = await _recorder.startStream(const RecordConfig(
+    final stream = await _recorder.startStream(RecordConfig(
       encoder: AudioEncoder.pcm16bits,
       sampleRate: sampleRate,
       numChannels: 1,
-      echoCancel: true,
-      noiseSuppress: true,
-      autoGain: true,
-      androidConfig: AndroidRecordConfig(
+      echoCancel: voiceProcessing,
+      noiseSuppress: voiceProcessing,
+      autoGain: voiceProcessing,
+      androidConfig: const AndroidRecordConfig(
         audioSource: AndroidAudioSource.voiceCommunication,
       ),
     ));
@@ -86,6 +92,13 @@ class AudioIO {
   /// Plays one decoded Brew frame (480 samples = 60 ms).
   void play(Int16List pcm) {
     if (!_playerReady) return;
+    // New talk spurt (or after an underrun): queue 60 ms of silence first so
+    // network jitter between frames does not turn into clicks and gaps.
+    final now = DateTime.now();
+    if (now.difference(_lastPlay) > const Duration(milliseconds: 150)) {
+      FlutterPcmSound.feed(PcmArrayInt16.fromList(Int16List(pcm.length)));
+    }
+    _lastPlay = now;
     FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm));
   }
 

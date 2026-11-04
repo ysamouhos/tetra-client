@@ -8,7 +8,7 @@ use crate::protocol::{self as p, CallPayload, Message};
 use crate::sds::{self, IncomingSds, LipReason, LipReport, Location};
 use crate::transport::{self, Endpoint, Ws};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
@@ -16,6 +16,11 @@ use uuid::Uuid;
 
 const REREGISTER_EVERY: Duration = Duration::from_secs(300);
 const TICK: Duration = Duration::from_millis(250);
+/// Brew traffic frames carry 60 ms of speech; a base station expects them at that
+/// cadence, not in the bursts a phone's audio callback produces.
+const VOICE_PACE: Duration = Duration::from_millis(60);
+/// Cap on queued, not-yet-sent voice frames (~0.6 s) so latency stays bounded.
+const MAX_TX_QUEUE: usize = 10;
 const SDS_HEADER_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
@@ -99,6 +104,7 @@ struct Session {
     events: mpsc::UnboundedSender<ClientEvent>,
     out: Vec<Vec<u8>>,
     encoder: Option<(Uuid, VoiceEncoder)>,
+    tx_queue: VecDeque<Vec<u8>>,
     decoders: HashMap<Uuid, VoiceDecoder>,
     sds_headers: HashMap<Uuid, (u32, u32, Instant)>,
     next_mr: u8,
@@ -123,6 +129,7 @@ impl Session {
             events,
             out: Vec::new(),
             encoder: None,
+            tx_queue: VecDeque::new(),
             decoders: HashMap::new(),
             sds_headers: HashMap::new(),
             next_mr: rand::random(),
@@ -141,7 +148,10 @@ impl Session {
                 Output::Send(w) => self.out.push(w),
                 Output::Event(e) => {
                     match &e {
-                        CallEvent::TxEnded { .. } => self.encoder = None,
+                        CallEvent::TxEnded { .. } => {
+                            self.encoder = None;
+                            self.tx_queue.clear();
+                        }
                         CallEvent::GroupTxEnded { id, .. } | CallEvent::PrivateEnded { id, .. } => {
                             self.decoders.remove(id);
                         }
@@ -175,6 +185,7 @@ impl Session {
                 self.apply(o)
             }
             Command::Ptt { pressed: false, .. } => {
+                self.finish_voice();
                 let o = self.engine.ptt_release();
                 self.apply(o)
             }
@@ -240,7 +251,10 @@ impl Session {
                     self.encoder = Some((id, VoiceEncoder::new()));
                 }
                 let frames = self.encoder.as_mut().unwrap().1.push_frames(&id, &pcm);
-                self.out.extend(frames);
+                self.tx_queue.extend(frames);
+                while self.tx_queue.len() > MAX_TX_QUEUE {
+                    self.tx_queue.pop_front();
+                }
             }
             Command::Shutdown => return false,
         }
@@ -319,6 +333,27 @@ impl Session {
         }
     }
 
+    /// End of our transmission: send the padded tail and everything still
+    /// queued, ahead of the call-release message that follows.
+    fn finish_voice(&mut self) {
+        let Some(id) = self.engine.tx_call() else { return };
+        if let Some((eid, enc)) = self.encoder.as_mut() {
+            if *eid == id {
+                if let Some(p) = enc.flush() {
+                    self.tx_queue.push_back(p::build_frame(p::FRAME_TRAFFIC_CHANNEL, &id, (p.len() * 8) as u16, &p));
+                }
+            }
+        }
+        self.out.extend(self.tx_queue.drain(..));
+    }
+
+    /// Releases one queued voice frame; called every [`VOICE_PACE`].
+    fn pace_voice(&mut self) {
+        if let Some(f) = self.tx_queue.pop_front() {
+            self.out.push(f);
+        }
+    }
+
     fn tick(&mut self) {
         let o = self.engine.tick(Instant::now());
         self.apply(o);
@@ -369,6 +404,8 @@ async fn run(cfg: ClientConfig, mut cmds: mpsc::UnboundedReceiver<Command>, even
         }
         s.emit(ClientEvent::Connected);
         let mut tick = tokio::time::interval(TICK);
+        let mut pace = tokio::time::interval(VOICE_PACE);
+        pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut rereg = tokio::time::interval_at(tokio::time::Instant::now() + REREGISTER_EVERY, REREGISTER_EVERY);
         let reason = loop {
             tokio::select! {
@@ -389,6 +426,7 @@ async fn run(cfg: ClientConfig, mut cmds: mpsc::UnboundedReceiver<Command>, even
                     Some(c) => { s.command(c); }
                 },
                 _ = tick.tick() => s.tick(),
+                _ = pace.tick() => s.pace_voice(),
                 _ = rereg.tick() => s.out.push(p::build_subscriber(p::SUB_REREGISTER, s.cfg.issi, &[])),
             }
             if let Err(e) = flush(&mut ws, &mut s).await {
@@ -401,6 +439,7 @@ async fn run(cfg: ClientConfig, mut cmds: mpsc::UnboundedReceiver<Command>, even
         let o = s.engine.ptt_release();
         s.apply(o);
         s.out.clear();
+        s.tx_queue.clear();
         s.emit(ClientEvent::Disconnected { reason });
     }
 }

@@ -188,7 +188,8 @@ class TerminalModel extends ChangeNotifier {
 
   void _startMic() {
     if (audio.micRunning) return;
-    audio.startMic((pcm) => _client?.pushMicPcm(pcm: pcm)).catchError((Object err) {
+    final duplex = privateCall?.state == 'connected' && privateCall!.duplex;
+    audio.startMic((pcm) => _client?.pushMicPcm(pcm: pcm), voiceProcessing: duplex).catchError((Object err) {
       toast = err.toString();
       notifyListeners();
     });

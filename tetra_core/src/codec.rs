@@ -73,6 +73,16 @@ impl VoiceEncoder {
         out
     }
 
+    /// End of transmission: pads a trailing partial block with silence so the
+    /// last words are not lost. Returns the final STE payload, if any.
+    pub fn flush(&mut self) -> Option<[u8; protocol::STE_VOICE_PAYLOAD_BYTES]> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let pad = FRAME_SAMPLES - self.pending.len();
+        self.push(&vec![0; pad]).pop()
+    }
+
     /// Same as [`push`] but returns ready-to-send Brew frames for call `id`.
     pub fn push_frames(&mut self, id: &Uuid, pcm: &[i16]) -> Vec<Vec<u8>> {
         self.push(pcm)
@@ -146,5 +156,11 @@ mod tests {
         }
         assert!(energy > 0, "decoded audio should not be silent");
         assert_eq!(dec.conceal().len(), FRAME_SAMPLES);
+
+        // A trailing partial block is padded out, not dropped.
+        let mut enc = VoiceEncoder::new();
+        assert!(enc.push(&tone[..100]).is_empty());
+        assert!(enc.flush().is_some());
+        assert!(enc.flush().is_none());
     }
 }
