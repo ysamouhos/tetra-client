@@ -148,6 +148,7 @@ class TerminalModel extends ChangeNotifier {
         toast = 'PTT denied: $reason';
       case AppEvent_TxEnded(:final callId, :final preempted):
         if (myTxCallId == callId) myTxCallId = null;
+        toast = audio.micSummary; // temporary TX diagnostics
         if (preempted) toast = 'Transmission pre-empted by a higher priority call';
         _updateMic();
       case AppEvent_PrivateCall(:final call):
