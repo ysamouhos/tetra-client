@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:audio_session/audio_session.dart';
@@ -13,6 +14,12 @@ import 'package:record/record.dart';
 /// touching the rest of the app.
 class AudioIO {
   static const sampleRate = 8000;
+
+  /// The mic is captured at 16 kHz and decimated here with a proper low-pass.
+  /// Asking Android for 8 kHz directly makes many devices resample badly
+  /// (aliasing = glitches and whistles that the ACELP codec amplifies).
+  static const _micRate = 16000;
+  final _decim = _Decimator2();
 
   final _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _micSub;
@@ -68,12 +75,13 @@ class AudioIO {
     micSamples = 0;
     micPeak = 0;
     micError = null;
+    _decim.reset();
     if (!await _recorder.hasPermission()) {
       throw StateError('Microphone permission denied');
     }
     final stream = await _recorder.startStream(RecordConfig(
       encoder: AudioEncoder.pcm16bits,
-      sampleRate: sampleRate,
+      sampleRate: _micRate,
       numChannels: 1,
       echoCancel: voiceProcessing,
       noiseSuppress: voiceProcessing,
@@ -91,14 +99,16 @@ class AudioIO {
       final even = all.length & ~1;
       if (even > 0) {
         final copy = Uint8List.fromList(all.sublist(0, even));
-        final samples = copy.buffer.asInt16List();
-        micChunks++;
-        micSamples += samples.length;
-        for (final v in samples) {
-          final a = v < 0 ? -v : v;
-          if (a > micPeak) micPeak = a;
+        final samples = _decim.process(copy.buffer.asInt16List());
+        if (samples.isNotEmpty) {
+          micChunks++;
+          micSamples += samples.length;
+          for (final v in samples) {
+            final a = v < 0 ? -v : v;
+            if (a > micPeak) micPeak = a;
+          }
+          onPcm(samples);
         }
-        onPcm(samples);
       }
       if (even < all.length) _carry.add(all.sublist(even));
     }, onError: (Object e) => micError = e);
@@ -128,5 +138,58 @@ class AudioIO {
     await stopMic();
     await _recorder.dispose();
     await FlutterPcmSound.release();
+  }
+}
+
+/// 16 kHz -> 8 kHz: windowed-sinc low-pass (cut-off 3.4 kHz) then keep every
+/// second sample. Streaming: carries filter history between chunks.
+class _Decimator2 {
+  static const _taps = 47;
+  static final List<double> _h = _design();
+
+  static List<double> _design() {
+    const fc = 3400 / 16000; // cycles per input sample
+    const m = (_taps - 1) / 2;
+    final h = List<double>.generate(_taps, (n) {
+      final x = n - m;
+      final sinc = x == 0 ? 2 * fc : math.sin(2 * math.pi * fc * x) / (math.pi * x);
+      final w = 0.54 - 0.46 * math.cos(2 * math.pi * n / (_taps - 1));
+      return sinc * w;
+    });
+    final sum = h.fold<double>(0, (a, b) => a + b);
+    return [for (final v in h) v / sum];
+  }
+
+  List<double> _hist = List<double>.filled(_taps - 1, 0);
+  int _count = 0;
+
+  void reset() {
+    _hist = List<double>.filled(_taps - 1, 0);
+    _count = 0;
+  }
+
+  Int16List process(Int16List input) {
+    final n = input.length;
+    final c = List<double>.filled(_taps - 1 + n, 0);
+    for (var i = 0; i < _taps - 1; i++) {
+      c[i] = _hist[i];
+    }
+    for (var i = 0; i < n; i++) {
+      c[_taps - 1 + i] = input[i].toDouble();
+    }
+    final out = <int>[];
+    for (var k = 0; k < n; k++) {
+      if ((_count + k).isEven) {
+        var y = 0.0;
+        final base = _taps - 1 + k;
+        for (var t = 0; t < _taps; t++) {
+          y += _h[t] * c[base - t];
+        }
+        out.add(y.round().clamp(-32768, 32767));
+      }
+    }
+    _count += n;
+    _hist = c.sublist(n);
+    return Int16List.fromList(out);
   }
 }

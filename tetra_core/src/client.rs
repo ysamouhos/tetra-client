@@ -19,8 +19,8 @@ const TICK: Duration = Duration::from_millis(250);
 /// Brew traffic frames carry 60 ms of speech; a base station expects them at that
 /// cadence, not in the bursts a phone's audio callback produces.
 const VOICE_PACE: Duration = Duration::from_millis(60);
-/// Cap on queued, not-yet-sent voice frames (~0.6 s) so latency stays bounded.
-const MAX_TX_QUEUE: usize = 10;
+/// Cap on queued, not-yet-sent voice frames (~1.5 s) so latency stays bounded.
+const MAX_TX_QUEUE: usize = 25;
 const SDS_HEADER_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
