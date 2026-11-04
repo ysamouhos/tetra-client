@@ -130,5 +130,17 @@ flutter pub get
 flutter_rust_bridge_codegen generate
 dart run build_runner build --delete-conflicting-outputs
 
+# 6. App icon and display name.
+dart run flutter_launcher_icons
+sed -i.bak -E 's/android:label="[^"]*"/android:label="TETRA Terminal"/' android/app/src/main/AndroidManifest.xml && rm -f android/app/src/main/AndroidManifest.xml.bak
+python3 - ios/Runner/Info.plist <<'PY'
+import plistlib, sys
+p = sys.argv[1]
+d = plistlib.load(open(p, 'rb'))
+d['CFBundleDisplayName'] = 'TETRA Terminal'
+d['CFBundleName'] = 'TETRA Terminal'
+plistlib.dump(d, open(p, 'wb'))
+PY
+
 echo
 echo "Done. Connect an Android phone and run:  flutter run"
