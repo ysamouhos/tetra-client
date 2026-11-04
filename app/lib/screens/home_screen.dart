@@ -33,7 +33,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(m.settings.name.isNotEmpty ? m.settings.name : 'ISSI ${m.settings.issi}'),
-        actions: [_LinkChip(m.link, m.lastError)],
+        actions: [_LinkChip(m)],
       ),
       body: Column(children: [
         const StatusBanner(),
@@ -61,22 +61,41 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class _LinkChip extends StatelessWidget {
-  const _LinkChip(this.link, this.error);
-  final LinkState link;
-  final String? error;
+  const _LinkChip(this.m);
+  final TerminalModel m;
 
   @override
   Widget build(BuildContext context) {
+    final link = m.link;
     final (label, color) = switch (link) {
       LinkState.online => ('Online', Colors.green),
       LinkState.connecting => ('Connecting', Colors.orange),
       LinkState.offline => ('Offline', Colors.grey),
     };
-    return Tooltip(
-      message: error ?? label,
-      child: Padding(
-        padding: const EdgeInsets.only(right: 12),
-        child: Row(children: [Icon(Icons.circle, size: 10, color: color), const SizedBox(width: 6), Text(label)]),
+    final connected = link != LinkState.offline;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Tooltip(
+        message: m.lastError ?? (connected ? 'Tap to disconnect' : 'Tap to connect'),
+        child: ActionChip(
+          avatar: Icon(Icons.circle, size: 10, color: color),
+          label: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(label),
+            const SizedBox(width: 6),
+            Icon(connected ? Icons.link_off : Icons.link, size: 18),
+          ]),
+          onPressed: () async {
+            if (connected) {
+              await m.disconnect();
+            } else if (!m.settings.isConfigured) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Fill in server, username and ISSI in Settings first')),
+              );
+            } else {
+              await m.connect();
+            }
+          },
+        ),
       ),
     );
   }
