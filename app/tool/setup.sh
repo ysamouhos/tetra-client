@@ -36,11 +36,17 @@ for root, _, files in os.walk("rust_builder"):
             text = open(path, encoding="utf-8").read()
         except (UnicodeDecodeError, OSError):
             continue
-        # Only the cargokit build files (they reference ../../rust); the package
-        # name in pubspec.yaml and the plugin class names must stay unchanged.
+        # Only cargokit's build lines: the crate path, Gradle's libname and the
+        # iOS -force_load of the static lib. Package/pod names stay unchanged.
         if "../../rust" not in text:
             continue
-        new = text.replace("../../rust", "../../../tetra_core").replace("rust_lib_tetra_terminal", "tetra_core")
+        out = []
+        for line in text.splitlines(keepends=True):
+            if "../../rust" in line or "libname" in line:
+                line = line.replace("../../rust", "../../../tetra_core").replace("rust_lib_tetra_terminal", "tetra_core")
+            line = line.replace("librust_lib_tetra_terminal", "libtetra_core")
+            out.append(line)
+        new = "".join(out)
         if new != text:
             open(path, "w", encoding="utf-8").write(new)
             changed += 1

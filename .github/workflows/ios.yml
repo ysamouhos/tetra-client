@@ -60,6 +60,16 @@ jobs:
           flutter analyze --no-fatal-infos
           flutter test
 
+      - name: Pin iOS platform in Podfile
+        working-directory: app
+        run: |
+          # Generates ios/Podfile (and the Xcode config) without a full build.
+          flutter build ios --config-only --no-codesign
+          sed -i '' -E "s/^# *platform :ios.*/platform :ios, '15.0'/" ios/Podfile
+          grep -q "^platform :ios" ios/Podfile || { printf "platform :ios, '15.0'\n" | cat - ios/Podfile > ios/Podfile.new && mv ios/Podfile.new ios/Podfile; }
+          grep -n "^platform" ios/Podfile
+          (cd ios && pod install --repo-update)
+
       - name: Build for device (unsigned)
         working-directory: app
         run: |
