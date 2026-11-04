@@ -140,7 +140,7 @@ if not os.path.exists(p):
 s = open(p).read()
 if "keystoreProperties" not in s:
     props = (
-        "\nval keystoreProperties = java.util.Properties().apply {\n"
+        "\nval keystoreProperties = Properties().apply {\n"
         "    val f = rootProject.file(\"key.properties\")\n"
         "    if (f.exists()) f.inputStream().use { load(it) }\n"
         "}\n"
@@ -149,6 +149,9 @@ if "keystoreProperties" not in s:
     if not m:
         sys.exit("no plugins {} block in " + p)
     s = s[:m.end()] + props + s[m.end():]
+    # `java.util.Properties` does not resolve in the Kotlin DSL (`java` is the Gradle extension).
+    if "import java.util.Properties" not in s:
+        s = "import java.util.Properties\n\n" + s
     signing = (
         "    signingConfigs {\n"
         "        create(\"release\") {\n"
