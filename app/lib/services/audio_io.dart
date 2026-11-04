@@ -145,6 +145,13 @@ class AudioIO {
 /// second sample. Streaming: carries filter history between chunks.
 class _Decimator2 {
   static const _taps = 47;
+  static const micGain = 0.6;
+  /// Peak ceiling after the gain. Louder input is attenuated instead of being
+  /// allowed to overdrive the ACELP encoder (harsh beeps on loud speech).
+  static const _limit = 12000.0;
+  /// Per-sample gain recovery after a peak (~100 ms at 8 kHz).
+  static const _release = 0.0012;
+  double _gain = 1.0;
   static final List<double> _h = _design();
 
   static List<double> _design() {
@@ -157,13 +164,16 @@ class _Decimator2 {
       return sinc * w;
     });
     final sum = h.fold<double>(0, (a, b) => a + b);
-    return [for (final v in h) v / sum];
+    // Unity DC gain, then micGain (-4 dB): phone mics run hot (peaks of 20000+) and a
+    // near-clipping input makes the ACELP encoder produce harsh beeps.
+    return [for (final v in h) v / sum * micGain];
   }
 
   List<double> _hist = List<double>.filled(_taps - 1, 0);
   int _count = 0;
 
   void reset() {
+    _gain = 1.0;
     _hist = List<double>.filled(_taps - 1, 0);
     _count = 0;
   }
@@ -185,7 +195,11 @@ class _Decimator2 {
         for (var t = 0; t < _taps; t++) {
           y += _h[t] * c[base - t];
         }
-        out.add(y.round().clamp(-32768, 32767));
+        // Instant-attack limiter: pull the gain down to fit the peak, ease back up.
+        final a = y.abs();
+        final want = a * _gain > _limit ? _limit / a : 1.0;
+        _gain = want < _gain ? want : _gain + (1.0 - _gain) * _release;
+        out.add((y * _gain).round().clamp(-32768, 32767));
       }
     }
     _count += n;
