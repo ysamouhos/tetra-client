@@ -1,0 +1,39 @@
+name: tetra_terminal
+description: TETRA Brew terminal for Android and iOS (group/private calls, SDS, LIP).
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Rust core bindings (generated into lib/src/rust by flutter_rust_bridge_codegen)
+  flutter_rust_bridge: 2.13.0
+  rust_lib_tetra_terminal:   # created by `flutter_rust_bridge_codegen integrate` (see README)
+    path: rust_builder
+  freezed_annotation: ^2.4.4
+  # App
+  provider: ^6.1.2
+  shared_preferences: ^2.3.2
+  permission_handler: ^11.3.1
+  # Audio: 8 kHz mono PCM16 in/out (see lib/services/audio_io.dart)
+  record: ^6.0.0
+  flutter_pcm_sound: ^3.1.0
+  audio_session: ^0.1.21
+  # LIP
+  geolocator: ^13.0.1
+  wakelock_plus: ^1.2.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.12
+  freezed: ^2.5.7
+  ffigen: ^13.0.0
+
+flutter:
+  uses-material-design: true

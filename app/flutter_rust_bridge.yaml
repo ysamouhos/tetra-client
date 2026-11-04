@@ -1,0 +1,4 @@
+# flutter_rust_bridge_codegen generate
+rust_input: crate::api
+rust_root: ../tetra_core/
+dart_output: lib/src/rust

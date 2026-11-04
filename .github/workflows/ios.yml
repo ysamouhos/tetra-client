@@ -1,0 +1,83 @@
+# Builds the iOS app on GitHub's macOS runners.
+# Outputs (Actions run page -> Artifacts):
+#   tetra-terminal-unsigned.ipa  sideload with Sideloadly / AltStore (free Apple ID re-signs it, 7-day validity)
+#   tetra-terminal-simulator     Runner.app for the iOS Simulator
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tetra_core
+
+      - name: Cache flutter_rust_bridge_codegen
+        id: frb
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/flutter_rust_bridge_codegen
+          key: frb-codegen-2.13.0-${{ runner.os }}
+
+      - name: Install flutter_rust_bridge_codegen
+        if: steps.frb.outputs.cache-hit != 'true'
+        run: cargo install --locked flutter_rust_bridge_codegen@2.13.0
+
+      - name: Rust core tests
+        working-directory: tetra_core
+        run: |
+          # frb_generated.rs is created by codegen in the next step; tests do not need it.
+          sed -i '' '/^mod frb_generated;/d' src/lib.rs
+          cargo test -q
+          git checkout src/lib.rs
+
+      - name: App setup (platform folders, Rust bridge, bindings)
+        working-directory: app
+        run: |
+          chmod +x tool/setup.sh
+          ./tool/setup.sh
+
+      - name: Analyze + test
+        working-directory: app
+        run: |
+          flutter analyze --no-fatal-infos
+          flutter test
+
+      - name: Build for device (unsigned)
+        working-directory: app
+        run: |
+          flutter build ios --release --no-codesign
+          mkdir -p ../out/Payload
+          cp -R build/ios/iphoneos/Runner.app ../out/Payload/
+          cd ../out && zip -qr tetra-terminal-unsigned.ipa Payload
+
+      - name: Build for Simulator
+        working-directory: app
+        run: flutter build ios --simulator --debug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tetra-terminal-unsigned-ipa
+          path: out/tetra-terminal-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tetra-terminal-simulator
+          path: app/build/ios/iphonesimulator/Runner.app
