@@ -1,4 +1,7 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart' show ExternalLibrary;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
@@ -10,7 +13,7 @@ import 'src/rust/frb_generated.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    await RustLib.init();
+    await RustLib.init(externalLibrary: _nativeCore());
   } catch (e, st) {
     // Without the native core nothing works; show why instead of hanging on the splash.
     runApp(_StartupError('$e\n\n$st'));
@@ -25,6 +28,19 @@ Future<void> main() async {
     await model.start();
   } catch (e) {
     model.toast = 'Startup: $e';
+  }
+}
+
+/// iOS: cargokit links the Rust core into the plugin's framework, which is named
+/// after the pod (rust_lib_tetra_terminal), not the crate (tetra_core). If that
+/// lookup fails the symbols are already in the process (static -force_load).
+/// Android/desktop: null = flutter_rust_bridge's default lookup (libtetra_core.so).
+ExternalLibrary? _nativeCore() {
+  if (!Platform.isIOS && !Platform.isMacOS) return null;
+  try {
+    return ExternalLibrary.open('rust_lib_tetra_terminal.framework/rust_lib_tetra_terminal');
+  } catch (_) {
+    return ExternalLibrary.process(iKnowHowToUseIt: true);
   }
 }
 
