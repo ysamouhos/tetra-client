@@ -36,6 +36,10 @@ for root, _, files in os.walk("rust_builder"):
             text = open(path, encoding="utf-8").read()
         except (UnicodeDecodeError, OSError):
             continue
+        # Only the cargokit build files (they reference ../../rust); the package
+        # name in pubspec.yaml and the plugin class names must stay unchanged.
+        if "../../rust" not in text:
+            continue
         new = text.replace("../../rust", "../../../tetra_core").replace("rust_lib_tetra_terminal", "tetra_core")
         if new != text:
             open(path, "w", encoding="utf-8").write(new)
