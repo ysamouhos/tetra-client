@@ -153,12 +153,7 @@ class _Decimator2 {
   double gain = _baseGain;
 
   void setTrimDb(double db) => gain = _baseGain * math.pow(10, db / 20).toDouble();
-  /// Peak ceiling after the gain. Louder input is attenuated instead of being
-  /// allowed to overdrive the ACELP encoder (harsh beeps on loud speech).
-  static const _limit = 12000.0;
-  /// Per-sample gain recovery after a peak (~100 ms at 8 kHz).
-  static const _release = 0.0012;
-  double _gain = 1.0;
+  final _lim = _Limiter();
   static final List<double> _h = _design();
 
   static List<double> _design() {
@@ -180,7 +175,7 @@ class _Decimator2 {
   int _count = 0;
 
   void reset() {
-    _gain = 1.0;
+    _lim.reset();
     _hist = List<double>.filled(_taps - 1, 0);
     _count = 0;
   }
@@ -202,16 +197,54 @@ class _Decimator2 {
         for (var t = 0; t < _taps; t++) {
           y += _h[t] * c[base - t];
         }
-        y *= gain;
-        // Instant-attack limiter: pull the gain down to fit the peak, ease back up.
-        final a = y.abs();
-        final want = a * _gain > _limit ? _limit / a : 1.0;
-        _gain = want < _gain ? want : _gain + (1.0 - _gain) * _release;
-        out.add((y * _gain).round().clamp(-32768, 32767));
+        out.add(_lim.process(y * gain).round().clamp(-32768, 32767));
       }
     }
     _count += n;
     _hist = c.sublist(n);
     return Int16List.fromList(out);
+  }
+}
+
+/// Look-ahead peak limiter. Louder input is attenuated instead of being allowed
+/// to overdrive the ACELP encoder (harsh beeps on loud speech). The gain ramps
+/// down smoothly *before* a peak (the signal is delayed by [_look] samples), so
+/// limiting adds no clicks, and recovers slowly (~100 ms) so sustained loud
+/// speech is not amplitude-modulated.
+class _Limiter {
+  static const _look = 16; // 2 ms at 8 kHz
+  static const _limit = 12000.0;
+  static const _release = 0.0012;
+
+  final List<double> _g = List<double>.filled(2 * _look + 1, 1.0); // wanted gains, oldest first
+  final List<double> _x = List<double>.filled(_look + 1, 0.0); // delayed signal
+  double _r = 1.0;
+
+  void reset() {
+    _g.fillRange(0, _g.length, 1.0);
+    _x.fillRange(0, _x.length, 0.0);
+    _r = 1.0;
+  }
+
+  double process(double x) {
+    _g.removeAt(0);
+    final a = x.abs();
+    _g.add(a > _limit ? _limit / a : 1.0);
+    _x.removeAt(0);
+    _x.add(x);
+    // Sliding minimum over the look-ahead window, averaged over the same length:
+    // guarantees the smoothed gain is <= the wanted gain at every sample.
+    var sum = 0.0;
+    for (var p = 0; p <= _look; p++) {
+      var m = 1.0;
+      for (var q = p; q <= p + _look; q++) {
+        if (_g[q] < m) m = _g[q];
+      }
+      sum += m;
+    }
+    final smooth = sum / (_look + 1);
+    final recovering = _r + (1.0 - _r) * _release;
+    _r = smooth < recovering ? smooth : recovering;
+    return _x[0] * _r;
   }
 }
