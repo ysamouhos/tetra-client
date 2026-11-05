@@ -56,15 +56,6 @@ class AudioIO {
 
   bool get micRunning => _micSub != null;
 
-  // Diagnostics for the last/current capture session.
-  int micChunks = 0;
-  int micSamples = 0;
-  int micPeak = 0;
-  Object? micError;
-  String get micSummary =>
-      'mic: ${micRunning ? "running" : "stopped"}, chunks=$micChunks, samples=$micSamples, peak=$micPeak'
-      '${micError != null ? ", error=$micError" : ""}';
-
   /// Starts streaming microphone audio to [onPcm]. Echo cancellation is on
   /// so full-duplex calls do not feed the speaker back into the mic.
   ///
@@ -74,10 +65,6 @@ class AudioIO {
   /// the ACELP encoder sees (and on iOS contends with the playback engine).
   Future<void> startMic(void Function(Int16List pcm) onPcm, {bool voiceProcessing = false}) async {
     if (_micSub != null) return;
-    micChunks = 0;
-    micSamples = 0;
-    micPeak = 0;
-    micError = null;
     _decim.reset();
     if (!await _recorder.hasPermission()) {
       throw StateError('Microphone permission denied');
@@ -103,18 +90,10 @@ class AudioIO {
       if (even > 0) {
         final copy = Uint8List.fromList(all.sublist(0, even));
         final samples = _decim.process(copy.buffer.asInt16List());
-        if (samples.isNotEmpty) {
-          micChunks++;
-          micSamples += samples.length;
-          for (final v in samples) {
-            final a = v < 0 ? -v : v;
-            if (a > micPeak) micPeak = a;
-          }
-          onPcm(samples);
-        }
+        if (samples.isNotEmpty) onPcm(samples);
       }
       if (even < all.length) _carry.add(all.sublist(even));
-    }, onError: (Object e) => micError = e);
+    });
   }
 
   Future<void> stopMic() async {
