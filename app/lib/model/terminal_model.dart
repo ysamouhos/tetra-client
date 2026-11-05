@@ -210,13 +210,31 @@ class TerminalModel extends ChangeNotifier {
   // ───────── actions ─────────
 
   void pttDown({bool emergency = false}) {
+    // Pressed again during the hang-over: just keep transmitting.
+    if (_releaseTimer != null) {
+      _releaseTimer!.cancel();
+      _releaseTimer = null;
+      if (myTxCallId != null) return;
+    }
     _client?.ptt(pressed: true, group: privateCall == null ? settings.selectedGssi : null, emergency: emergency);
     if (settings.lipEnabled && (settings.lipOnPtt || emergency)) {
       location.sendNow(emergency ? LipReason.emergency : LipReason.ptt);
     }
   }
 
-  void pttUp() => _client?.ptt(pressed: false, group: null, emergency: false);
+  Timer? _releaseTimer;
+
+  /// Keeps the mic live for a moment after release so the end of the last word
+  /// is captured and sent instead of being cut off mid-syllable.
+  static const _hangover = Duration(milliseconds: 120);
+
+  void pttUp() {
+    _releaseTimer?.cancel();
+    _releaseTimer = Timer(_hangover, () {
+      _releaseTimer = null;
+      _client?.ptt(pressed: false, group: null, emergency: false);
+    });
+  }
 
   Future<void> selectGroup(int gssi) async {
     settings.selectedGssi = gssi;

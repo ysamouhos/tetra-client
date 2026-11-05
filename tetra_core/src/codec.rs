@@ -12,6 +12,10 @@ use uuid::Uuid;
 /// Samples in one Brew traffic frame (two ACELP subframes).
 pub const FRAME_SAMPLES: usize = 2 * ACELP_PCM_SAMPLES;
 pub const SAMPLE_RATE: u32 = 8000;
+/// Fade-out applied to the last samples of a transmission (10 ms).
+const FADE_SAMPLES: usize = 80;
+/// Silent 60 ms blocks sent after the last speech.
+const TAIL_SILENCE_BLOCKS: usize = 2;
 
 #[repr(C)]
 struct RawCodec {
@@ -73,14 +77,24 @@ impl VoiceEncoder {
         out
     }
 
-    /// End of transmission: pads a trailing partial block with silence so the
-    /// last words are not lost. Returns the final STE payload, if any.
-    pub fn flush(&mut self) -> Option<[u8; protocol::STE_VOICE_PAYLOAD_BYTES]> {
-        if self.pending.is_empty() {
-            return None;
+    /// End of transmission. Fades out and pads the trailing partial block with
+    /// silence (so the last words are not lost and there is no hard step), then
+    /// appends [`TAIL_SILENCE_BLOCKS`] blocks of silence so the far-end decoder
+    /// settles instead of glitching on the cut. Returns the final STE payloads.
+    pub fn flush(&mut self) -> Vec<[u8; protocol::STE_VOICE_PAYLOAD_BYTES]> {
+        let mut out = Vec::new();
+        if !self.pending.is_empty() {
+            let n = self.pending.len();
+            let fade = n.min(FADE_SAMPLES);
+            for i in 0..fade {
+                let k = n - fade + i;
+                self.pending[k] = (self.pending[k] as f32 * (1.0 - (i + 1) as f32 / fade as f32)) as i16;
+            }
+            let pad = FRAME_SAMPLES - n;
+            out.extend(self.push(&vec![0; pad]));
         }
-        let pad = FRAME_SAMPLES - self.pending.len();
-        self.push(&vec![0; pad]).pop()
+        out.extend(self.push(&vec![0; FRAME_SAMPLES * TAIL_SILENCE_BLOCKS]));
+        out
     }
 
     /// Same as [`push`] but returns ready-to-send Brew frames for call `id`.
@@ -160,7 +174,6 @@ mod tests {
         // A trailing partial block is padded out, not dropped.
         let mut enc = VoiceEncoder::new();
         assert!(enc.push(&tone[..100]).is_empty());
-        assert!(enc.flush().is_some());
-        assert!(enc.flush().is_none());
+        assert_eq!(enc.flush().len(), 1 + TAIL_SILENCE_BLOCKS);
     }
 }

@@ -339,7 +339,7 @@ impl Session {
         let Some(id) = self.engine.tx_call() else { return };
         if let Some((eid, enc)) = self.encoder.as_mut() {
             if *eid == id {
-                if let Some(p) = enc.flush() {
+                for p in enc.flush() {
                     self.tx_queue.push_back(p::build_frame(p::FRAME_TRAFFIC_CHANNEL, &id, (p.len() * 8) as u16, &p));
                 }
             }

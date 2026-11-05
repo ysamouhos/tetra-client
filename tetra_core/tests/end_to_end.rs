@@ -155,7 +155,19 @@ async fn full_terminal_session() {
         assert_eq!((kind, id, data.len()), (p::FRAME_TRAFFIC_CHANNEL, my, 36));
     }
     h.send(Command::Ptt { pressed: false, group: None, emergency: false });
-    assert!(matches!(recv_msg(&mut ws).await, Message::CallControl { state: p::CALL_GROUP_IDLE, .. }));
+    // The end of speech is followed by silent tail frames, then GROUP_IDLE.
+    let mut tail = 0;
+    loop {
+        match recv_msg(&mut ws).await {
+            Message::Frame { kind: p::FRAME_TRAFFIC_CHANNEL, id, .. } => {
+                assert_eq!(id, my);
+                tail += 1;
+            }
+            Message::CallControl { state: p::CALL_GROUP_IDLE, .. } => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(tail >= 1, "silent tail frames precede GROUP_IDLE");
 
     // ── Incoming full-duplex private call, answered ──
     let pid = Uuid::new_v4();
