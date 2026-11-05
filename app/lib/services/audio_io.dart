@@ -216,8 +216,9 @@ class _Limiter {
   static const _limit = 12000.0;
   static const _release = 0.0012;
 
-  final List<double> _g = List<double>.filled(2 * _look + 1, 1.0); // wanted gains, oldest first
-  final List<double> _x = List<double>.filled(_look + 1, 0.0); // delayed signal
+  // growable: we shift these (removeAt/add) every sample; filled() is fixed-length by default.
+  final List<double> _g = List<double>.filled(2 * _look + 1, 1.0, growable: true); // wanted gains, oldest first
+  final List<double> _x = List<double>.filled(_look + 1, 0.0, growable: true); // delayed signal
   double _r = 1.0;
 
   void reset() {
