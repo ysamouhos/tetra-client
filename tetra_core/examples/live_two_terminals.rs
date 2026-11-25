@@ -37,13 +37,15 @@ fn terminal(url: &str, cred: &str, gssi: u32, name: &str) -> (u32, ClientHandle,
     let (user, pass) = cred.split_once(':').expect("issi:password");
     let issi: u32 = user.parse().unwrap();
     let (h, ev) = client::spawn(ClientConfig {
-        endpoint: Endpoint { url: url.into(), username: user.into(), password: pass.into(), user_agent: format!("TetraBrewTerminal/live-{issi}"), insecure_tls: true },
+        endpoint: Endpoint { url: url.into(), username: user.into(), password: pass.into(), user_agent: format!("TetraBrewTerminal/live-{issi}"), insecure_tls: true, mode: Default::default() },
         issi,
         name: Some(name.into()),
         groups: vec![gssi],
         selected_group: Some(gssi),
         default_priority: 1,
         allow_preemption: true,
+        home_network: None,
+        group_networks: Default::default(),
     });
     (issi, h, ev)
 }

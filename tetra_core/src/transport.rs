@@ -1,7 +1,8 @@
 //! Connection set-up: HTTP Digest discovery and the WebSocket upgrade.
 //!
 //! Flow (Brew spec "Endpoint, authentication", as brew-server implements it):
-//! 1. `GET /brew` with `User-Agent`, `X-Brew-Mode: Terminal`, `X-Brew-Version: 1`.
+//! 1. `GET /brew` with `User-Agent`, `X-Brew-Mode` (`Terminal`, or `Basestation`
+//!    when the profile logs in as a station), `X-Brew-Version: 1`.
 //! 2. On 401, answer the `Digest realm=…, nonce=…, qop="auth", opaque=…`
 //!    challenge (RFC 2617 MD5, qop=auth) on the same path.
 //! 3. The 200 body is the WebSocket path (`/brew/session/<token>`, single use).
@@ -39,6 +40,27 @@ pub enum ConnectError {
     Ws(#[from] tokio_tungstenite::tungstenite::Error),
 }
 
+/// How the client logs in (`X-Brew-Mode`). Terminal is the default and what
+/// TetraPack expects from an app. Basestation logs in the way FlowStation
+/// does, for a server whose operator lets this app in as a station; the
+/// messages the client sends are the same (one radio's REGISTER/AFFILIATE
+/// with the wall-clock time, periodic REREGISTER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrewMode {
+    #[default]
+    Terminal,
+    Basestation,
+}
+
+impl BrewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrewMode::Terminal => "Terminal",
+            BrewMode::Basestation => "Basestation",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Endpoint {
     /// e.g. `https://brew.example.org:9000/brew` (http:// for a lab server).
@@ -48,6 +70,7 @@ pub struct Endpoint {
     pub user_agent: String,
     /// Accept self-signed certificates (lab use only).
     pub insecure_tls: bool,
+    pub mode: BrewMode,
 }
 
 fn md5_hex(s: &str) -> String {
@@ -68,7 +91,7 @@ fn tls_config(insecure: bool) -> Arc<rustls::ClientConfig> {
     Arc::new(cfg)
 }
 
-async fn open(url: &Url, insecure: bool) -> Result<Stream, ConnectError> {
+pub(crate) async fn open(url: &Url, insecure: bool) -> Result<Stream, ConnectError> {
     let host = url.host_str().ok_or_else(|| ConnectError::Url("missing host".into()))?.to_string();
     let port = url.port_or_known_default().ok_or_else(|| ConnectError::Url("missing port".into()))?;
     let tcp = TcpStream::connect((host.as_str(), port)).await?;
@@ -105,21 +128,27 @@ async fn http_get(url: &Url, ep: &Endpoint, authorization: Option<&str>) -> Resu
         Some(p) => format!("{}:{p}", url.host_str().unwrap_or_default()),
         None => url.host_str().unwrap_or_default().to_string(),
     };
+    let req = discovery_request(url.path(), &host, ep, authorization);
+    s.write_all(req.as_bytes()).await?;
+    let mut raw = Vec::new();
+    // Bounded read: the discovery response is tiny.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), s.take(64 * 1024).read_to_end(&mut raw)).await;
+    parse_http(&raw).ok_or(ConnectError::BadResponse)
+}
+
+/// The discovery GET (step 1 / 2 of the flow).
+fn discovery_request(path: &str, host: &str, ep: &Endpoint, authorization: Option<&str>) -> String {
     let mut req = format!(
-        "GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {}\r\nX-Brew-Mode: Terminal\r\nX-Brew-Version: {}\r\nConnection: close\r\n",
-        url.path(),
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {}\r\nX-Brew-Mode: {}\r\nX-Brew-Version: {}\r\nConnection: close\r\n",
         ep.user_agent,
+        ep.mode.as_str(),
         crate::protocol::BREW_PROTOCOL_VERSION
     );
     if let Some(a) = authorization {
         req.push_str(&format!("Authorization: {a}\r\n"));
     }
     req.push_str("\r\n");
-    s.write_all(req.as_bytes()).await?;
-    let mut raw = Vec::new();
-    // Bounded read: the discovery response is tiny.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), s.take(64 * 1024).read_to_end(&mut raw)).await;
-    parse_http(&raw).ok_or(ConnectError::BadResponse)
+    req
 }
 
 fn parse_http(raw: &[u8]) -> Option<HttpResponse> {
@@ -210,8 +239,15 @@ pub fn normalize_url(raw: &str) -> Result<Url, ConnectError> {
     Ok(url)
 }
 
-/// Discovery + authentication + WebSocket upgrade.
-pub async fn connect(ep: &Endpoint) -> Result<Ws, ConnectError> {
+/// `X-Brew-Extensions` of a 101: comma separated names, trimmed, empty ones dropped.
+pub fn parse_extensions(v: Option<&str>) -> Vec<String> {
+    v.unwrap_or_default().split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect()
+}
+
+/// Discovery + authentication + WebSocket upgrade. Also returns the Brew
+/// extensions the server offers on the 101 (empty for TetraPack and other
+/// servers without the header): the client uses an extension only then.
+pub async fn connect(ep: &Endpoint) -> Result<(Ws, Vec<String>), ConnectError> {
     let url = normalize_url(&ep.url)?;
     let mut resp = http_get(&url, ep, None).await?;
     if resp.status == 401 {
@@ -236,11 +272,12 @@ pub async fn connect(ep: &Endpoint) -> Result<Ws, ConnectError> {
     let h = req.headers_mut();
     h.insert("Sec-WebSocket-Protocol", HeaderValue::from_static("brew"));
     h.insert("User-Agent", HeaderValue::from_str(&ep.user_agent).map_err(|_| ConnectError::Url("bad user agent".into()))?);
-    h.insert("X-Brew-Mode", HeaderValue::from_static("Terminal"));
+    h.insert("X-Brew-Mode", HeaderValue::from_static(ep.mode.as_str()));
     h.insert("X-Brew-Version", HeaderValue::from_static("1"));
     let stream = open(&ws_url, ep.insecure_tls).await?;
-    let (ws, _resp) = tokio_tungstenite::client_async(req, stream).await?;
-    Ok(ws)
+    let (ws, resp) = tokio_tungstenite::client_async(req, stream).await?;
+    let offered = parse_extensions(resp.headers().get("X-Brew-Extensions").and_then(|v| v.to_str().ok()));
+    Ok((ws, offered))
 }
 
 #[derive(Debug)]
@@ -303,6 +340,25 @@ mod tests {
         assert_eq!(p["response"], want);
         assert_eq!(p["opaque"], "0f0f");
         assert_eq!(p["uri"], "/brew");
+    }
+
+    #[test]
+    fn discovery_sends_the_profile_login_mode() {
+        let mut ep = Endpoint { url: String::new(), username: String::new(), password: String::new(), user_agent: "TetraBrewTerminal/1.4.0".into(), insecure_tls: false, mode: BrewMode::default() };
+        let req = discovery_request("/brew/", "h", &ep, None);
+        assert!(req.contains("\r\nX-Brew-Mode: Terminal\r\n"), "{req}");
+        ep.mode = BrewMode::Basestation;
+        let req = discovery_request("/brew/", "h", &ep, Some("Digest x"));
+        assert!(req.contains("\r\nX-Brew-Mode: Basestation\r\n"), "{req}");
+        assert!(req.contains("\r\nUser-Agent: TetraBrewTerminal/1.4.0\r\n"));
+        assert!(req.ends_with("Authorization: Digest x\r\n\r\n"));
+    }
+
+    #[test]
+    fn parses_the_extension_offer() {
+        assert_eq!(parse_extensions(Some("dmo-position, mni")), vec!["dmo-position", "mni"]);
+        assert_eq!(parse_extensions(Some(" ,mni,, ")), vec!["mni"]);
+        assert!(parse_extensions(None).is_empty());
     }
 
     #[test]

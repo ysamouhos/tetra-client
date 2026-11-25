@@ -45,6 +45,21 @@ pub const ERROR_RESTRICTED: u8 = 1;
 
 pub const SERVICE_QUERY_SUBSCRIBERS: u8 = 1;
 pub const SERVICE_SUBSCRIBER_PROFILES: u8 = 2;
+/// Multi Network (brew-server extension `mni`, docs/Brew-Extensions.md 12b).
+/// Sent and expected only when the server offers `mni` in `X-Brew-Extensions`.
+pub const SERVICE_NETWORKS: u8 = 0x20;
+pub const SERVICE_MS_NETWORK: u8 = 0x21;
+pub const SERVICE_GROUP_NETWORK: u8 = 0x22;
+pub const SERVICE_CALL_NETWORK: u8 = 0x23;
+
+/// Extension name in `X-Brew-Extensions`.
+pub const EXT_MNI: &str = "mni";
+
+/// Group access (brew-server extension `group-access`, docs/Brew-Extensions.md
+/// 12.3): the terminal asks with an empty message after `SUB_REGISTER` and
+/// gets the table for its own ISSI, now and on every change.
+pub const SERVICE_GROUP_ACCESS: u8 = 0x1F;
+pub const EXT_GROUP_ACCESS: &str = "group-access";
 
 /// Disconnect causes, ETSI EN 300 392-2 clause 14.8.18 (subset used here).
 pub mod cause {
@@ -153,13 +168,22 @@ fn ascii_field(d: &[u8]) -> String {
 }
 
 /// Decode an SS-TPI mnemonic (EN 300 392-9 table 17): scheme, length in
-/// bits, characters. Schemes 0 (8-bit) and 1 (7-bit packed) as the server does.
+/// bits, characters. Brew convention (as the server does): scheme 0 = 8-bit,
+/// scheme 1 = 7-bit packed (LSB first).
+///
+/// Some sources (seen from a FlowStation DMO bridge, 2026-11-25) send plain
+/// 8-bit text with scheme 1, which is the ISO 8859-1 code in the ETSI text
+/// coding scheme list (unverified against the text). Unpacked as 7-bit that
+/// turns "OE1GKS" into "O\nE94i". So for scheme 1, when the 7-bit result has
+/// control characters but the 8-bit reading is printable, the 8-bit one wins.
 pub fn decode_mnemonic(field: &[u8]) -> Option<String> {
     if field.len() < 2 || field[1] == 0 {
         return None;
     }
     let len_bits = field[1] as usize;
     let text = &field[2..];
+    let eight_bit = || -> String { text.iter().take((len_bits / 8).min(text.len())).map(|&b| b as char).collect() };
+    let printable = |s: &str| s.trim_end_matches(['\0', ' ']).chars().all(|c| !c.is_control());
     let s: String = match field[0] & 0x7f {
         0x01 => {
             let mut out = String::new();
@@ -175,9 +199,9 @@ pub fn decode_mnemonic(field: &[u8]) -> Option<String> {
                 }
                 out.push(((v & 0x7f) as u8) as char);
             }
-            out
+            if !printable(&out) && len_bits % 8 == 0 && printable(&eight_bit()) { eight_bit() } else { out }
         }
-        _ => text.iter().take((len_bits / 8).min(text.len())).map(|&b| b as char).collect(),
+        _ => eight_bit(),
     };
     let s = s.trim_end_matches(['\0', ' ']).to_string();
     (!s.is_empty()).then_some(s)
@@ -517,5 +541,20 @@ mod tests {
     #[test]
     fn mnemonic_round_trip() {
         assert_eq!(decode_mnemonic(&encode_mnemonic("Dispatch 1")).as_deref(), Some("Dispatch 1"));
+    }
+
+    #[test]
+    fn eight_bit_text_sent_as_scheme_1_is_read_as_8_bit() {
+        // FlowStation DMO bridge: "OE1GKS" as plain octets, scheme 1, 48 bits.
+        let mut f = vec![0x01, 48];
+        f.extend_from_slice(b"OE1GKS");
+        assert_eq!(decode_mnemonic(&f).as_deref(), Some("OE1GKS"));
+    }
+
+    #[test]
+    fn real_7_bit_packed_text_still_decodes() {
+        // "OE1GKS" packed LSB first, 42 bits.
+        let f = [0x01, 42, 0xcf, 0x62, 0xec, 0xb8, 0x9c, 0x02];
+        assert_eq!(decode_mnemonic(&f).as_deref(), Some("OE1GKS"));
     }
 }

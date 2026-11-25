@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import 'model/settings.dart';
 import 'model/terminal_model.dart';
 import 'screens/home_screen.dart';
+import 'ui/theme.dart';
 import 'src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -66,12 +67,16 @@ class TetraApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const seed = Color(0xFF1F6F5C);
     return MaterialApp(
       title: 'TETRA Terminal',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed), useMaterial3: true),
-      darkTheme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark), useMaterial3: true),
+      theme: buildTheme(Brightness.light),
+      darkTheme: buildTheme(Brightness.dark),
+      themeMode: switch (context.select<TerminalModel, String>((m) => m.settings.appearance)) {
+        'light' => ThemeMode.light,
+        'dark' => ThemeMode.dark,
+        _ => ThemeMode.system,
+      },
       home: const HomeScreen(),
     );
   }

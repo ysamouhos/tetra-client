@@ -11,10 +11,19 @@ on:
 
 jobs:
   ios:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      # Liquid Glass in the Live Activity needs the iOS 26 SDK (Xcode 26).
+      # Picks the newest Xcode 26 on the runner; keeps the default otherwise.
+      - name: Select Xcode
+        continue-on-error: true
+        run: |
+          x=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$x" ]; then sudo xcode-select -s "$x"; fi
+          xcodebuild -version
 
       - uses: subosito/flutter-action@v2
         with:
@@ -70,10 +79,40 @@ jobs:
           grep -n "^platform" ios/Podfile
           (cd ios && pod install --repo-update)
 
-      - name: Build for device (unsigned)
+      - name: Live Activity + home screen widget extension
+        id: widgets
+        continue-on-error: true
         working-directory: app
         run: |
+          cp -R ios ../ios-without-widgets
+          bash ios_widgets/install.sh
+
+      - name: Build for device (unsigned)
+        id: device
+        continue-on-error: true
+        working-directory: app
+        run: flutter build ios --release --no-codesign
+
+      - name: Build for device without the widget extension (fallback)
+        if: steps.device.outcome == 'failure'
+        working-directory: app
+        run: |
+          echo "::warning::The build with the Live Activity / widget extension failed (see the step above). Building the app without it."
+          rm -rf ios build/ios && cp -R ../ios-without-widgets ios
           flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        working-directory: app
+        run: |
+          APP=build/ios/iphoneos/Runner.app
+          if [ -d "$APP/PlugIns/TetraWidgets.appex" ]; then
+            # Ad-hoc signature carrying the App Group entitlements, so tools that
+            # re-sign the IPA (Sideloadly, AltStore) can keep them for the widget.
+            ( set +e
+              for f in "$APP"/Frameworks/*; do codesign --force --sign - "$f"; done
+              codesign --force --sign - --entitlements ios/TetraWidgets/TetraWidgets.entitlements "$APP/PlugIns/TetraWidgets.appex" &&
+              codesign --force --sign - --entitlements ios/Runner/Runner.entitlements "$APP" ) || echo "::warning::Ad-hoc signing failed; the IPA is unsigned."
+          fi
           mkdir -p ../out/Payload
           cp -R build/ios/iphoneos/Runner.app ../out/Payload/
           cd ../out && zip -qr tetra-terminal-unsigned.ipa Payload

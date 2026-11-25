@@ -1,0 +1,9 @@
+<resources>
+    <string name="tetra_live_widget_name">TETRA radio</string>
+    <string name="tetra_live_widget_description">Talkgroup, talker and push-to-talk</string>
+    <color name="tetra_live_surface">#FFE8F3EE</color>
+    <color name="tetra_live_on_surface">#FF101C17</color>
+    <color name="tetra_live_on_surface_variant">#FF3F4945</color>
+    <color name="tetra_live_accent">#FF1F8A70</color>
+    <color name="tetra_live_talk">#FFE5484D</color>
+</resources>

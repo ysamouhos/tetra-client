@@ -1,4 +1,5 @@
-# Builds the Android app on the self-hosted runner labelled "runner1".
+# Builds the Android app: on the self-hosted runner "runner1" in the upstream
+# repository (ysamouhos), on GitHub's ubuntu-latest runners in forks.
 # Outputs (Actions run page -> Artifacts): tetra-terminal-android (debug-signed APKs, for testing).
 # Signed release builds are produced by release.yml.
 name: Android
@@ -10,7 +11,7 @@ on:
 
 jobs:
   android:
-    runs-on: runner1
+    runs-on: ${{ github.repository_owner == 'ysamouhos' && 'runner1' || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

@@ -23,6 +23,13 @@ const VOICE_PACE: Duration = Duration::from_millis(60);
 const MAX_TX_QUEUE: usize = 25;
 const SDS_HEADER_TTL: Duration = Duration::from_secs(10);
 
+/// A network by its MNI (MCC 10 bits, MNC 14 bits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Mni {
+    pub mcc: u16,
+    pub mnc: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub endpoint: Endpoint,
@@ -33,6 +40,12 @@ pub struct ClientConfig {
     pub selected_group: Option<u32>,
     pub default_priority: u8,
     pub allow_preemption: bool,
+    /// Multi Network (`mni`, only when the server offers it): this terminal's
+    /// home network; `None` = the server's own network.
+    pub home_network: Option<Mni>,
+    /// Groups that belong to another network than the home network (GSSI →
+    /// network). Every other group is in the home network.
+    pub group_networks: HashMap<u32, Mni>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +71,13 @@ pub enum ClientEvent {
     LocationReceived { from: u32, report: LipReport },
     SubscriberProfiles { json: String },
     ServerError { kind: u8 },
+    /// Extensions the server offered on this connection.
+    Extensions { offered: Vec<String> },
+    /// `SERVICE_NETWORKS` (Multi Network): this server's network and the
+    /// linked ones, as JSON.
+    Networks { json: String },
+    /// `SERVICE_GROUP_ACCESS`: who may use which group, lists reduced to our ISSI.
+    GroupAccess { json: String },
 }
 
 #[derive(Debug)]
@@ -70,6 +90,8 @@ pub enum Command {
     Hangup,
     SelectGroup(u32),
     SetGroups { groups: Vec<u32>, selected: Option<u32> },
+    /// Networks of groups outside the home network (see [`ClientConfig::group_networks`]).
+    SetGroupNetworks(HashMap<u32, Mni>),
     SendText { local_id: u32, to: u32, text: String, immediate: bool, request_report: bool },
     SendLocation { to: u32, location: Location, reason: LipReason },
     QuerySubscribers(Vec<u32>),
@@ -112,6 +134,9 @@ struct Session {
     pending_reports: HashMap<(u32, u8), u32>,
     /// Brew SDS uuid → app message id (for network-level FRAME_SDS_REPORT).
     pending_net: HashMap<Uuid, u32>,
+    /// The server offered `mni` on this connection.
+    mni: bool,
+    group_access: bool,
 }
 
 impl Session {
@@ -135,6 +160,8 @@ impl Session {
             next_mr: rand::random(),
             pending_reports: HashMap::new(),
             pending_net: HashMap::new(),
+            mni: false,
+            group_access: false,
         }
     }
 
@@ -145,7 +172,12 @@ impl Session {
     fn apply(&mut self, outputs: Vec<Output>) {
         for o in outputs {
             match o {
-                Output::Send(w) => self.out.push(w),
+                Output::Send(w) => {
+                    if let Some(note) = self.call_network_note(&w) {
+                        self.out.push(note);
+                    }
+                    self.out.push(w)
+                }
                 Output::Event(e) => {
                     match &e {
                         CallEvent::TxEnded { .. } => {
@@ -163,12 +195,67 @@ impl Session {
         }
     }
 
+    /// After connecting: with `mni`, the home network first (0/0 = the
+    /// server's own; this also takes up the offer), then `SUB_REGISTER`, the
+    /// groups of other networks and `SUB_AFFILIATE`.
     fn registration(&self) -> Vec<Vec<u8>> {
-        let mut v = vec![p::build_subscriber(p::SUB_REGISTER, self.cfg.issi, &[])];
-        if !self.cfg.groups.is_empty() {
-            v.push(p::build_subscriber(p::SUB_AFFILIATE, self.cfg.issi, &self.cfg.groups));
+        let mut v = Vec::new();
+        if self.mni {
+            let home = self.cfg.home_network.unwrap_or_default();
+            let json = serde_json::json!({ "issi": self.cfg.issi, "mcc": home.mcc, "mnc": home.mnc });
+            v.push(p::build_service(p::SERVICE_MS_NETWORK, &json.to_string()));
         }
+        v.push(p::build_subscriber(p::SUB_REGISTER, self.cfg.issi, &[]));
+        if self.group_access {
+            v.push(p::build_service(p::SERVICE_GROUP_ACCESS, "{}"));
+        }
+        v.extend(self.affiliation(p::SUB_AFFILIATE, &self.cfg.groups));
         v
+    }
+
+    /// Periodic refresh, as FlowStation does for its radios: `SUB_REREGISTER`
+    /// and the groups again.
+    fn reregistration(&self) -> Vec<Vec<u8>> {
+        let mut v = vec![p::build_subscriber(p::SUB_REREGISTER, self.cfg.issi, &[])];
+        v.extend(self.affiliation(p::SUB_AFFILIATE, &self.cfg.groups));
+        v
+    }
+
+    /// `SUB_AFFILIATE` / `SUB_DEAFFILIATE` for `groups`, with `mni` preceded by
+    /// `SERVICE_GROUP_NETWORK` naming those that belong to another network.
+    fn affiliation(&self, kind: u8, groups: &[u32]) -> Vec<Vec<u8>> {
+        if groups.is_empty() {
+            return Vec::new();
+        }
+        let mut v = Vec::new();
+        if self.mni {
+            let home = self.cfg.home_network.unwrap_or_default();
+            let foreign: Vec<_> = groups
+                .iter()
+                .filter_map(|g| self.cfg.group_networks.get(g).filter(|n| **n != home && **n != Mni::default()).map(|n| (*g, *n)))
+                .map(|(g, n)| serde_json::json!({ "gssi": g, "mcc": n.mcc, "mnc": n.mnc }))
+                .collect();
+            if !foreign.is_empty() {
+                let json = serde_json::json!({ "issi": self.cfg.issi, "groups": foreign });
+                v.push(p::build_service(p::SERVICE_GROUP_NETWORK, &json.to_string()));
+            }
+        }
+        v.push(p::build_subscriber(kind, self.cfg.issi, groups));
+        v
+    }
+
+    /// With `mni`: `SERVICE_CALL_NETWORK` before our own `GROUP_TX` on a group
+    /// of another network.
+    fn call_network_note(&self, w: &[u8]) -> Option<Vec<u8>> {
+        if !self.mni || w.len() < 26 || w[0] != p::CLASS_CALL_CONTROL || w[1] != p::CALL_GROUP_TX {
+            return None;
+        }
+        let id = Uuid::from_slice(&w[2..18]).ok()?;
+        let gssi = u32::from_le_bytes(w[22..26].try_into().ok()?);
+        let home = self.cfg.home_network.unwrap_or_default();
+        let n = self.cfg.group_networks.get(&gssi).filter(|n| **n != home && **n != Mni::default())?;
+        let json = serde_json::json!({ "uuid": id.to_string(), "group": { "gssi": gssi, "mcc": n.mcc, "mnc": n.mnc } });
+        Some(p::build_service(p::SERVICE_CALL_NETWORK, &json.to_string()))
     }
 
     fn send_sds(&mut self, to: u32, data: Vec<u8>, bits: u16) -> Uuid {
@@ -212,15 +299,13 @@ impl Session {
             Command::SetGroups { groups, selected } => {
                 let removed: Vec<u32> = self.cfg.groups.iter().copied().filter(|g| !groups.contains(g)).collect();
                 let added: Vec<u32> = groups.iter().copied().filter(|g| !self.cfg.groups.contains(g)).collect();
-                if !removed.is_empty() {
-                    self.out.push(p::build_subscriber(p::SUB_DEAFFILIATE, self.cfg.issi, &removed));
-                }
-                if !added.is_empty() {
-                    self.out.push(p::build_subscriber(p::SUB_AFFILIATE, self.cfg.issi, &added));
-                }
+                let mut msgs = self.affiliation(p::SUB_DEAFFILIATE, &removed);
+                msgs.extend(self.affiliation(p::SUB_AFFILIATE, &added));
+                self.out.extend(msgs);
                 self.cfg.groups = groups.clone();
                 self.engine.set_groups(groups, selected);
             }
+            Command::SetGroupNetworks(n) => self.cfg.group_networks = n,
             Command::SendText { local_id, to, text, immediate, request_report } => {
                 let mr = self.next_mr;
                 self.next_mr = self.next_mr.wrapping_add(1);
@@ -294,6 +379,11 @@ impl Session {
             Message::Service { kind: p::SERVICE_SUBSCRIBER_PROFILES, json } => {
                 self.emit(ClientEvent::SubscriberProfiles { json: json.clone() })
             }
+            Message::Service { kind: p::SERVICE_NETWORKS, json } if self.mni => self.emit(ClientEvent::Networks { json: json.clone() }),
+            Message::Service { kind: p::SERVICE_GROUP_ACCESS, json } if self.group_access => self.emit(ClientEvent::GroupAccess { json: json.clone() }),
+            // The group's network before a GROUP_TX: the GROUP_TX carries that
+            // network's GSSI, which is how the app knows the group.
+            Message::Service { kind: p::SERVICE_CALL_NETWORK, .. } => {}
             Message::Error { kind, .. } => self.emit(ClientEvent::ServerError { kind: *kind }),
             _ => {
                 let o = self.engine.on_message(&msg);
@@ -374,7 +464,12 @@ async fn run(cfg: ClientConfig, mut cmds: mpsc::UnboundedReceiver<Command>, even
     loop {
         s.emit(ClientEvent::Connecting);
         let mut ws = match transport::connect(&s.cfg.endpoint).await {
-            Ok(ws) => ws,
+            Ok((ws, offered)) => {
+                s.mni = offered.iter().any(|e| e == p::EXT_MNI);
+                s.group_access = offered.iter().any(|e| e == p::EXT_GROUP_ACCESS);
+                s.emit(ClientEvent::Extensions { offered });
+                ws
+            }
             Err(e) => {
                 s.emit(ClientEvent::Disconnected { reason: e.to_string() });
                 if matches!(e, transport::ConnectError::Unauthorized) {
@@ -427,7 +522,7 @@ async fn run(cfg: ClientConfig, mut cmds: mpsc::UnboundedReceiver<Command>, even
                 },
                 _ = tick.tick() => s.tick(),
                 _ = pace.tick() => s.pace_voice(),
-                _ = rereg.tick() => s.out.push(p::build_subscriber(p::SUB_REREGISTER, s.cfg.issi, &[])),
+                _ = rereg.tick() => { let r = s.reregistration(); s.out.extend(r); }
             }
             if let Err(e) = flush(&mut ws, &mut s).await {
                 break e.to_string();
@@ -441,5 +536,75 @@ async fn run(cfg: ClientConfig, mut cmds: mpsc::UnboundedReceiver<Command>, even
         s.out.clear();
         s.tx_queue.clear();
         s.emit(ClientEvent::Disconnected { reason });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(mni: bool) -> Session {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cfg = ClientConfig {
+            endpoint: Endpoint { url: String::new(), username: String::new(), password: String::new(), user_agent: String::new(), insecure_tls: false, mode: Default::default() },
+            issi: 2040001,
+            name: None,
+            groups: vec![91, 2324],
+            selected_group: Some(91),
+            default_priority: 1,
+            allow_preemption: true,
+            home_network: Some(Mni { mcc: 901, mnc: 1638 }),
+            group_networks: HashMap::from([(2324, Mni { mcc: 901, mnc: 9999 }), (91, Mni { mcc: 901, mnc: 1638 })]),
+        };
+        let mut s = Session::new(cfg, tx);
+        s.mni = mni;
+        s
+    }
+
+    fn kinds(v: &[Vec<u8>]) -> Vec<(u8, u8)> {
+        v.iter().map(|w| (w[0], w[1])).collect()
+    }
+
+    #[test]
+    fn periodic_reregistration_affiliates_again() {
+        let s = session(false);
+        assert_eq!(kinds(&s.reregistration()), vec![(p::CLASS_SUBSCRIBER, p::SUB_REREGISTER), (p::CLASS_SUBSCRIBER, p::SUB_AFFILIATE)]);
+    }
+
+    #[test]
+    fn without_the_offer_no_network_messages() {
+        let s = session(false);
+        assert_eq!(kinds(&s.registration()), vec![(p::CLASS_SUBSCRIBER, p::SUB_REGISTER), (p::CLASS_SUBSCRIBER, p::SUB_AFFILIATE)]);
+    }
+
+    #[test]
+    fn with_group_access_offered_the_table_is_asked_for_after_register() {
+        let mut s = session(false);
+        s.group_access = true;
+        assert_eq!(
+            kinds(&s.registration()),
+            vec![(p::CLASS_SUBSCRIBER, p::SUB_REGISTER), (p::CLASS_SERVICE, p::SERVICE_GROUP_ACCESS), (p::CLASS_SUBSCRIBER, p::SUB_AFFILIATE)]
+        );
+        assert_eq!(&s.registration()[1][2..], b"{}\0");
+    }
+
+    #[test]
+    fn with_mni_only_groups_outside_the_home_network_are_named() {
+        let s = session(true);
+        let r = s.registration();
+        assert_eq!(
+            kinds(&r),
+            vec![
+                (p::CLASS_SERVICE, p::SERVICE_MS_NETWORK),
+                (p::CLASS_SUBSCRIBER, p::SUB_REGISTER),
+                (p::CLASS_SERVICE, p::SERVICE_GROUP_NETWORK),
+                (p::CLASS_SUBSCRIBER, p::SUB_AFFILIATE)
+            ]
+        );
+        let Message::Service { json, .. } = p::parse(&r[2]).unwrap() else { panic!() };
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["groups"], serde_json::json!([{ "gssi": 2324, "mcc": 901, "mnc": 9999 }]), "91 is in the home network");
+        let Message::Service { json, .. } = p::parse(&r[0]).unwrap() else { panic!() };
+        assert!(json.contains("\"mnc\":1638"));
     }
 }

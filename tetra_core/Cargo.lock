@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "tetra_core"
-version = "0.1.0"
+version = "1.4.0"
 dependencies = [
  "cc",
  "flutter_rust_bridge",

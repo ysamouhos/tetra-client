@@ -28,3 +28,6 @@ out/
 *.jks
 *.keystore
 key.properties
+
+# Screenshot renders (flutter test test_screenshots --update-goldens)
+app/test_screenshots/out/

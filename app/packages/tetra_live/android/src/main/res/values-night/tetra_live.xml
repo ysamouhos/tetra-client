@@ -1,0 +1,6 @@
+<resources>
+    <color name="tetra_live_surface">#FF1A2420</color>
+    <color name="tetra_live_on_surface">#FFE0EAE5</color>
+    <color name="tetra_live_on_surface_variant">#FFBFC9C3</color>
+    <color name="tetra_live_accent">#FF3CC79F</color>
+</resources>
