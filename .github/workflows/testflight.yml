@@ -96,7 +96,34 @@ jobs:
           req = Net::HTTP::Get.new(uri); req['Authorization'] = "Bearer #{jwt}"
           res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
           case res.code
-          when '200' then puts "App Store Connect accepted the key (HTTP 200)."
+          when '200'
+            puts "App Store Connect accepted the key (HTTP 200)."
+            # Register the app + widget bundle IDs (what Xcode's signing does
+            # first) and show Apple's own error if that is refused.
+            api = lambda do |method, path, body = nil|
+              u = URI("https://api.appstoreconnect.apple.com#{path}")
+              r = (method == :post ? Net::HTTP::Post : Net::HTTP::Get).new(u)
+              r['Authorization'] = "Bearer #{jwt}"; r['Content-Type'] = 'application/json'
+              r.body = JSON.generate(body) if body
+              Net::HTTP.start(u.host, u.port, use_ssl: true) { |h| h.request(r) }
+            end
+            base = ENV['BUNDLE_ID'].to_s
+            [[base, 'TETRA Terminal'], ["#{base}.TetraWidgets", 'TETRA Terminal Widgets']].each do |id, name|
+              g = api.(:get, "/v1/bundleIds?filter[identifier]=#{URI.encode_www_form_component(id)}&limit=5")
+              if JSON.parse(g.body)['data'].to_a.any? { |d| d.dig('attributes', 'identifier') == id }
+                puts "Bundle ID #{id}: registered in your team."
+                next
+              end
+              p = api.(:post, '/v1/bundleIds', { data: { type: 'bundleIds', attributes: { identifier: id, name: name, platform: 'IOS' } } })
+              if p.code == '201'
+                puts "Bundle ID #{id}: registered now."
+              else
+                detail = (JSON.parse(p.body)['errors'] || []).map { |e| "#{e['code']}: #{e['detail']}" }.join(' | ') rescue p.body[0, 400]
+                hint = detail =~ /not available|already/i ? ' This ID belongs to another developer team; set the IOS_BUNDLE_ID repository variable to an ID of your own (e.g. com.yourname.tetraterminal).' : ''
+                hint = ' Accept the pending agreements in App Store Connect (Business) and on developer.apple.com.' if detail =~ /agreement/i
+                fail!("Apple refused to register bundle ID #{id} (HTTP #{p.code}): #{detail}.#{hint}")
+              end
+            end
           when '401' then fail!("App Store Connect rejected the key (401). The Key ID, Issuer ID and .p8 file are well-formed but don't belong together: the .p8 must be the file downloaded for exactly this Key ID, and the Issuer ID must come from the Team Keys page. Or the key was revoked.")
           when '403' then fail!("The key is valid but lacks permission (403). Use a Team key with the Admin role. #{res.body[0, 300]}")
           else fail!("Unexpected response HTTP #{res.code}: #{res.body[0, 300]}")
