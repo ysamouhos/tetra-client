@@ -50,6 +50,59 @@ jobs:
             [ -n "${!v}" ] || { echo "::error::Missing secret for $v (see the header of testflight.yml)"; exit 1; }
           done
 
+      # Fails fast (before the long build) with a plain explanation of which
+      # API key secret is wrong. Never prints secret values.
+      - name: Verify App Store Connect API key
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          KEY_B64: ${{ secrets.APP_STORE_CONNECT_KEY_BASE64 }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ruby - <<'RUBY'
+          require 'openssl'; require 'base64'; require 'json'; require 'net/http'
+          def fail!(m); puts "::error::#{m}"; exit 1; end
+          key_id = ENV['KEY_ID'].to_s; issuer = ENV['ISSUER'].to_s; team = ENV['TEAM'].to_s
+          [[key_id, 'APP_STORE_CONNECT_KEY_ID'], [issuer, 'APP_STORE_CONNECT_ISSUER_ID'], [team, 'APPLE_TEAM_ID']].each do |v, n|
+            fail!("#{n} has leading/trailing whitespace or quotes; re-enter it with the bare value.") if v != v.strip || v =~ /["']/
+          end
+          fail!("APP_STORE_CONNECT_KEY_ID should be 10 letters/digits (length #{key_id.length}); use only the ID, without AuthKey_ or .p8.") unless key_id =~ /\A[A-Z0-9]{10}\z/
+          fail!("APP_STORE_CONNECT_ISSUER_ID should be a UUID like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (from the Team Keys page), not the Team ID.") unless issuer =~ /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/i
+          fail!("APPLE_TEAM_ID should be 10 letters/digits (length #{team.length}).") unless team =~ /\A[A-Z0-9]{10}\z/
+          pem = begin
+            Base64.decode64(ENV['KEY_B64'].to_s.gsub(/\s/, ''))
+          rescue => e
+            fail!("APP_STORE_CONNECT_KEY_BASE64 is not valid base64 (#{e.class}).")
+          end
+          if pem.include?('BEGIN PRIVATE KEY') == false
+            hint = ENV['KEY_B64'].to_s.include?('BEGIN PRIVATE KEY') ? ' It looks like you pasted the raw .p8 text; paste the base64 output instead.' : ''
+            fail!("APP_STORE_CONNECT_KEY_BASE64 does not decode to a .p8 private key.#{hint}")
+          end
+          key = begin
+            OpenSSL::PKey.read(pem)
+          rescue => e
+            fail!("The decoded .p8 could not be parsed as a private key (#{e.message}); re-encode the original file.")
+          end
+          fail!("The .p8 is not an EC (ES256) key; is it an App Store Connect API key?") unless key.is_a?(OpenSSL::PKey::EC)
+          puts "Key file OK, Key ID / Issuer ID / Team ID formats OK."
+          b64 = ->(s) { Base64.urlsafe_encode64(s, padding: false) }
+          now = Time.now.to_i
+          input = b64.(JSON.generate(alg: 'ES256', kid: key_id, typ: 'JWT')) + '.' +
+                  b64.(JSON.generate(iss: issuer, iat: now, exp: now + 600, aud: 'appstoreconnect-v1'))
+          der = key.sign(OpenSSL::Digest::SHA256.new, input)
+          r, s = OpenSSL::ASN1.decode(der).value.map { |i| i.value.to_s(2).rjust(32, "\0")[-32, 32] }
+          jwt = "#{input}.#{b64.(r + s)}"
+          uri = URI('https://api.appstoreconnect.apple.com/v1/bundleIds?limit=1')
+          req = Net::HTTP::Get.new(uri); req['Authorization'] = "Bearer #{jwt}"
+          res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
+          case res.code
+          when '200' then puts "App Store Connect accepted the key (HTTP 200)."
+          when '401' then fail!("App Store Connect rejected the key (401). The Key ID, Issuer ID and .p8 file are well-formed but don't belong together: the .p8 must be the file downloaded for exactly this Key ID, and the Issuer ID must come from the Team Keys page. Or the key was revoked.")
+          when '403' then fail!("The key is valid but lacks permission (403). Use a Team key with the Admin role. #{res.body[0, 300]}")
+          else fail!("Unexpected response HTTP #{res.code}: #{res.body[0, 300]}")
+          end
+          RUBY
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
