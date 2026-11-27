@@ -104,7 +104,7 @@ def setup
   [[base, 'TETRA Terminal', 'APP'], ["#{base}.TetraWidgets", 'TETRA Terminal Widgets', 'WIDGET']].each do |identifier, name, key|
     res_id = bundle_resource(identifier, name)
     enable_app_groups(res_id, identifier)
-    profile_name = "#{identifier} AppStore #{tag}"
+    profile_name = "#{identifier}-appstore-#{tag}"
     code, data = api(:post, '/v1/profiles', { data: { type: 'profiles',
       attributes: { name: profile_name, profileType: 'IOS_APP_STORE' },
       relationships: {
