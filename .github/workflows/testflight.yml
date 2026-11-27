@@ -45,6 +45,11 @@ jobs:
           if [ -n "$x" ]; then
             echo "DEVELOPER_DIR=$x/Contents/Developer" >> "$GITHUB_ENV"
             DEVELOPER_DIR="$x/Contents/Developer" xcodebuild -version
+            # Flutter's native-asset build hooks run xcrun with a minimal
+            # environment (no DEVELOPER_DIR), so the global selection must be Xcode.
+            if ! env -i PATH=/usr/bin:/bin HOME="$HOME" xcrun --show-sdk-path --sdk iphoneos >/dev/null 2>&1; then
+              missing+=("Xcode is not the active developer directory ($(xcode-select -p)). Run once: sudo xcode-select -s $x")
+            fi
           else
             missing+=("Xcode: install it from the App Store, open it once and accept the license")
           fi
