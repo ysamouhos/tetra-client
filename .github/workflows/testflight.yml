@@ -48,8 +48,8 @@ jobs:
           else
             missing+=("Xcode: install it from the App Store, open it once and accept the license")
           fi
-          for d in /opt/homebrew/bin "$HOME/.cargo/bin"; do [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"; done
-          export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
+          for d in /opt/homebrew/bin /opt/homebrew/opt/rustup/bin "$HOME/.cargo/bin"; do [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"; done
+          export PATH="/opt/homebrew/bin:/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
           if command -v pod >/dev/null && [ -d "$(brew --prefix cocoapods 2>/dev/null)/libexec" ]; then
             # xcodeproj gem (used by ios_widgets and the signing step) from Homebrew's CocoaPods.
             echo "GEM_HOME=$(brew --prefix cocoapods)/libexec" >> "$GITHUB_ENV"
@@ -58,7 +58,7 @@ jobs:
           else
             missing+=("CocoaPods: brew install cocoapods")
           fi
-          command -v rustup >/dev/null || missing+=("Rust: brew install rustup && rustup-init -y")
+          command -v rustup >/dev/null || missing+=("Rust: brew install rustup && /opt/homebrew/opt/rustup/bin/rustup default stable")
           if [ ${#missing[@]} -gt 0 ]; then
             for m in "${missing[@]}"; do echo "::error::Missing on this runner: $m"; done
             exit 1
