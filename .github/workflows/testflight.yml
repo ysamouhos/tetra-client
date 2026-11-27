@@ -48,7 +48,8 @@ jobs:
           else
             missing+=("Xcode: install it from the App Store, open it once and accept the license")
           fi
-          for d in /opt/homebrew/bin /opt/homebrew/opt/rustup/bin "$HOME/.cargo/bin"; do [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"; done
+          for d in /opt/homebrew/bin /opt/homebrew/opt/rustup/bin; do [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"; done
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"  # cargo install target; may not exist yet
           export PATH="/opt/homebrew/bin:/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
           if command -v pod >/dev/null && [ -d "$(brew --prefix cocoapods 2>/dev/null)/libexec" ]; then
             # xcodeproj gem (used by ios_widgets and the signing step) from Homebrew's CocoaPods.
