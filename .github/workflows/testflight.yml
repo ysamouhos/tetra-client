@@ -164,26 +164,21 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
+          cache: false  # self-hosted: the Flutter SDK stays in the runner tool dir
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tetra_core
-
-      - name: Cache flutter_rust_bridge_codegen
-        id: frb
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/flutter_rust_bridge_codegen
-          key: frb-codegen-${{ env.FRB_VERSION }}-${{ runner.os }}
-
-      - name: Install flutter_rust_bridge_codegen
-        if: steps.frb.outputs.cache-hit != 'true'
-        run: cargo install --locked flutter_rust_bridge_codegen@${{ env.FRB_VERSION }}
+      # No GitHub cache on the self-hosted Mac: Rust build output and the codegen
+      # binary stay on disk between runs (uploading the cache took over an hour).
+      - name: Install flutter_rust_bridge_codegen (if missing)
+        run: |
+          if flutter_rust_bridge_codegen --version 2>/dev/null | grep -q "${{ env.FRB_VERSION }}"; then
+            echo "flutter_rust_bridge_codegen ${{ env.FRB_VERSION }} already installed."
+          else
+            cargo install --locked flutter_rust_bridge_codegen@${{ env.FRB_VERSION }}
+          fi
 
       - name: App setup
         working-directory: app
@@ -263,6 +258,11 @@ jobs:
         env:
           TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          # One version/build number for the app and the widget extension.
+          export VERSION=$(grep -m1 "^version:" ../pubspec.yaml | sed -E "s/version: *//; s/\+.*//")
+          export BUILD=$(( $(date +%s) / 60 ))
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"; echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          echo "Version $VERSION ($BUILD)"
           ruby -rxcodeproj -e '
             p = Xcodeproj::Project.open("Runner.xcodeproj")
             { "Runner" => ENV["APP_PROFILE_NAME"], "TetraWidgets" => ENV["WIDGET_PROFILE_NAME"] }.each do |t, prof|
@@ -275,6 +275,10 @@ jobs:
                 s["CODE_SIGN_IDENTITY[sdk=iphoneos*]"] = ENV["SIGN_HASH"]
                 s["OTHER_CODE_SIGN_FLAGS"] = "--keychain #{ENV["KEYCHAIN_PATH"]}"
                 s["PROVISIONING_PROFILE_SPECIFIER"] = prof
+                if t == "TetraWidgets"
+                  s["MARKETING_VERSION"] = ENV["VERSION"]
+                  s["CURRENT_PROJECT_VERSION"] = ENV["BUILD"]
+                end
               end
             end
             p.save'
@@ -282,9 +286,6 @@ jobs:
       - name: Flutter release build (no codesign)
         working-directory: app
         run: |
-          VERSION=$(grep -m1 '^version:' pubspec.yaml | sed -E 's/version: *//; s/\+.*//')
-          BUILD=$(( $(date +%s) / 60 ))   # monotonic build number
-          echo "Version $VERSION ($BUILD)"
           flutter build ios --release --no-codesign --build-name "$VERSION" --build-number "$BUILD"
 
       - name: Archive + export IPA (manual signing)
