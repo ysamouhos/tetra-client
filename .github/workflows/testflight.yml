@@ -12,8 +12,10 @@
 #     IOS_BUNDLE_ID                  defaults to org.tetra.terminal.tetraTerminal
 #
 # Also create the app record in App Store Connect with the same bundle ID.
-# Signing is automatic: Xcode creates the distribution certificate and
-# provisioning profiles (app + .TetraWidgets extension, App Group) with the API key.
+# Signing uses the API: each run creates a temporary distribution certificate
+# and App Store profiles (app + .TetraWidgets), and revokes/deletes them afterwards.
+# One-time: register App Group group.<bundle id> on developer.apple.com and
+# assign it to both identifiers (the API cannot create App Groups).
 name: TestFlight
 
 on:
@@ -168,7 +170,7 @@ jobs:
           sed -i '' -E "s/PRODUCT_BUNDLE_IDENTIFIER = org\.tetra\.terminal\.tetraTerminal([.;])/PRODUCT_BUNDLE_IDENTIFIER = ${BUNDLE_ID}\1/g" "$P"
           # Put the team on every build configuration of every target.
           sed -i '' -E "/DEVELOPMENT_TEAM = /d" "$P"
-          TEAM="$TEAM" perl -pi -e 's/(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)/$1\n\t\t\t\tDEVELOPMENT_TEAM = $ENV{TEAM};\n\t\t\t\tCODE_SIGN_STYLE = Automatic;/g' "$P"
+          TEAM="$TEAM" perl -pi -e 's/(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)/$1\n\t\t\t\tDEVELOPMENT_TEAM = $ENV{TEAM};/g' "$P"
           grep -n "PRODUCT_BUNDLE_IDENTIFIER\|DEVELOPMENT_TEAM" "$P"
           sed -i '' -E "s/^# *platform :ios.*/platform :ios, '15.0'/" ios/Podfile
           grep -q "^platform :ios" ios/Podfile || { printf "platform :ios, '15.0'\n" | cat - ios/Podfile > ios/Podfile.new && mv ios/Podfile.new ios/Podfile; }
@@ -187,6 +189,61 @@ jobs:
           echo "$KEY_B64" | base64 -d > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
           echo "ASC_KEY_PATH=$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8" >> "$GITHUB_ENV"
 
+      # Distribution certificate + App Store profiles via the API (no Xcode
+      # automatic signing). Both are temporary and removed in "Signing cleanup".
+      - name: Signing setup (certificate, profiles, keychain)
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          export KEY_PATH="$ASC_KEY_PATH" OUT="$RUNNER_TEMP/signing"
+          ruby .github/scripts/asc_signing.rb setup
+          cat "$OUT/signing.env" >> "$GITHUB_ENV"
+          source "$OUT/signing.env"
+
+          KC="$RUNNER_TEMP/signing.keychain-db"; KCPW=$(openssl rand -hex 16)
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          security import "$OUT/dist_key.pem" -A -k "$KC"
+          security import "$OUT/dist.cer" -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KCPW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$OUT/dist_key.pem"
+          security find-identity -v -p codesigning "$KC"
+
+          for d in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$d"; cp "$APP_PROFILE_PATH" "$WIDGET_PROFILE_PATH" "$d/"
+          done
+          for p in "$APP_PROFILE_PATH" "$WIDGET_PROFILE_PATH"; do
+            security cms -D -i "$p" > "$p.plist"
+            if ! grep -q "group.${BUNDLE_ID}<" "$p.plist"; then
+              echo "::error::The profile for $(basename "$p" .mobileprovision) does not include the App Group group.${BUNDLE_ID}. On developer.apple.com -> Identifiers: register the App Group group.${BUNDLE_ID}, then open ${BUNDLE_ID} and ${BUNDLE_ID}.TetraWidgets, tick App Groups -> Configure -> select that group, Save. Then run this workflow again."
+              exit 1
+            fi
+          done
+          echo "Profiles include the App Group."
+
+      - name: Use manual signing in the Xcode project
+        working-directory: app/ios
+        env:
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ruby -rxcodeproj -e '
+            p = Xcodeproj::Project.open("Runner.xcodeproj")
+            { "Runner" => ENV["APP_PROFILE_NAME"], "TetraWidgets" => ENV["WIDGET_PROFILE_NAME"] }.each do |t, prof|
+              target = p.targets.find { |x| x.name == t } or abort("no target #{t}")
+              target.build_configurations.each do |c|
+                s = c.build_settings
+                s["CODE_SIGN_STYLE"] = "Manual"
+                s["DEVELOPMENT_TEAM"] = ENV["TEAM"]
+                s["CODE_SIGN_IDENTITY"] = "Apple Distribution"
+                s["CODE_SIGN_IDENTITY[sdk=iphoneos*]"] = "Apple Distribution"
+                s["PROVISIONING_PROFILE_SPECIFIER"] = prof
+              end
+            end
+            p.save'
+
       - name: Flutter release build (no codesign)
         working-directory: app
         run: |
@@ -195,36 +252,59 @@ jobs:
           echo "Version $VERSION ($BUILD)"
           flutter build ios --release --no-codesign --build-name "$VERSION" --build-number "$BUILD"
 
-      - name: Archive + export (automatic signing)
+      - name: Archive + export IPA (manual signing)
         working-directory: app/ios
         env:
-          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          AUTH=(-allowProvisioningUpdates
-                -authenticationKeyPath "$ASC_KEY_PATH"
-                -authenticationKeyID "$KEY_ID"
-                -authenticationKeyIssuerID "$ISSUER")
           xcodebuild -workspace Runner.xcworkspace -scheme Runner -configuration Release \
-            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic \
-            "${AUTH[@]}" archive
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Runner.xcarchive" archive
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>method</key><string>app-store-connect</string>
-            <key>destination</key><string>upload</string>
+            <key>destination</key><string>export</string>
             <key>teamID</key><string>${TEAM}</string>
-            <key>signingStyle</key><string>automatic</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${BUNDLE_ID}</key><string>${APP_PROFILE_NAME}</string>
+              <key>${BUNDLE_ID}.TetraWidgets</key><string>${WIDGET_PROFILE_NAME}</string>
+            </dict>
             <key>manageAppVersionAndBuildNumber</key><false/>
           </dict></plist>
           EOF
           xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
-            -exportPath "$RUNNER_TEMP/export" "${AUTH[@]}"
-          echo "Uploaded to App Store Connect; the build appears in TestFlight after processing."
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export"
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: Upload to TestFlight
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          IPA=$(ls "$RUNNER_TEMP"/export/*.ipa | head -1)
+          # altool finds the key in ~/.appstoreconnect/private_keys.
+          xcrun altool --upload-app -f "$IPA" -t ios --apiKey "$KEY_ID" --apiIssuer "$ISSUER" --output-format normal
+          echo "Uploaded. The build appears in TestFlight after Apple finishes processing (usually 5-30 min)."
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testflight-ipa
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: ignore
+
+      - name: Signing cleanup (revoke certificate, delete profiles)
+        if: always()
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          [ -f "${ASC_KEY_PATH:-/nonexistent}" ] || exit 0
+          KEY_PATH="$ASC_KEY_PATH" OUT="$RUNNER_TEMP/signing" ruby .github/scripts/asc_signing.rb cleanup
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
       - name: Remove API key
         if: always()
